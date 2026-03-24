@@ -47,21 +47,21 @@ python generate_all_weather.py \
 
 # 2. 可视化对比
 python vis_and_diff.py \
-    --clean_dir /data/kitti/training/velodyne \
-    --weather_dirs \
-        rain:/data/kitti_weather/rain_random/velodyne \
-        snow:/data/kitti_weather/snow_random/velodyne \
-        fog:/data/kitti_weather/fog_random/velodyne \
-    --output_dir /data/analysis/visualization \
-    --num_samples 10
+  --clean_dir /mnt/nvme0n1p2/data/datasets/KITTI2/object/training/velodyne \
+  --weather_dirs \
+    rain:/mnt/nvme0n1p2/data/datasets/kitti_weather_random/rain_random/velodyne \
+    snow:/mnt/nvme0n1p2/data/datasets/kitti_weather_random/snow_random/velodyne \
+    fog:/mnt/nvme0n1p2/data/datasets/kitti_weather_random/fog_random/velodyne \
+  --output_dir /home/ubuntu/SWW/analysis/visualization \
+  --frames 000001 000050 000100
 
 # 3. Domain shift分析
 python domain_analysis.py \
-    --clean_dir /data/kitti/training/velodyne \
+    --clean_dir /mnt/nvme0n1p2/data/datasets/KITTI2/object/training/velodyne \
     --weather_dirs \
-        rain:/data/kitti_weather/rain_random/velodyne \
-        snow:/data/kitti_weather/snow_random/velodyne \
-        fog:/data/kitti_weather/fog_random/velodyne \
+        rain:/mnt/nvme0n1p2/data/datasets/kitti_weather_random/rain_random/velodyne \
+        snow:/mnt/nvme0n1p2/data/datasets/kitti_weather_random/snow_random/velodyne \
+        fog:/mnt/nvme0n1p2/data/datasets/kitti_weather_random/fog_random/velodyne \
     --output_dir /data/analysis/domain_shift \
     --max_frames 200
 ```

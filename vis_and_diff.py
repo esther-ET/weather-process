@@ -36,13 +36,13 @@ def get_distance(pts):
 # ============ 1. 点云BEV可视化 ============
 
 def plot_bev_comparison(clean_pts, weather_pts_dict, save_path,
-                        xlim=(-40, 40), ylim=(0, 70), title_prefix=""):
+                        xlim=(-40, 40), ylim=(0, 70), title_prefix=""): # 默认y轴负数半轴不要了
     """
     鸟瞰图(BEV)对比: 清晰 vs 各天气
     颜色编码: 强度值
     """
     n_weather = len(weather_pts_dict)
-    fig, axes = plt.subplots(1, n_weather + 1, figsize=(6 * (n_weather + 1), 6))
+    fig, axes = plt.subplots(1, n_weather + 1, figsize=(6 * (n_weather + 1), 6), constrained_layout=True)
     if n_weather == 0:
         axes = [axes]
 
@@ -64,8 +64,9 @@ def plot_bev_comparison(clean_pts, weather_pts_dict, save_path,
     for i, (name, pts) in enumerate(weather_pts_dict.items()):
         draw_bev(axes[i + 1], pts, f"{title_prefix}{name}")
 
-    fig.colorbar(sc, ax=axes, label='Intensity', shrink=0.6)
-    plt.tight_layout()
+    cbar = fig.colorbar(sc, ax=axes, location='right', fraction=0.03, pad=0.02)
+    cbar.set_label('Intensity')
+    # plt.tight_layout()
     plt.savefig(save_path, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"  Saved BEV: {save_path}")
@@ -584,3 +585,8 @@ Examples:
         sample_indices=args.frames,
         num_samples=args.num_samples
     )
+
+"""
+
+
+"""
