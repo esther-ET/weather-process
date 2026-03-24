@@ -22,7 +22,7 @@
 浓雾     50 - 200
 强浓雾   30 - 50         ← <30m后点云几乎全丢
 
-三种采样模式对比：
+# 三种采样模式对比：
 sample_mode='uniform'   均匀分布 → 每个值等概率
 sample_mode='log'       对数均匀 → 偏向中低强度，更接近真实天气分布 (推荐)
 sample_mode='category'  分类采样 → 先等概率选等级(light/moderate/heavy/extreme)，再在等级内均匀
