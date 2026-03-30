@@ -74,7 +74,11 @@ class FogSimulation:
             return np.empty((0, 4), dtype=np.float32)
         n = int(200 * (200 / self.visibility))
         cd = self.visibility * np.random.uniform(0.5, 1.0)
-        az = np.random.uniform(-np.pi, np.pi, n)
+        # 雾幕应是“局部墙状”结构，而不是环形壳层:
+        # 保持约90°角宽，并随机其中心方位，兼顾360°场景与局部性
+        center_az = np.random.uniform(-np.pi, np.pi)
+        az = center_az + np.random.uniform(-np.pi / 4, np.pi / 4, n)
+        az = (az + np.pi) % (2 * np.pi) - np.pi
         el = np.random.uniform(np.radians(-20), np.radians(2.0), n)
         r = np.clip(cd + np.random.normal(0, 2.0, n), cd * 0.8, cd * 1.2)
         return np.stack([
