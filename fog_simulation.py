@@ -19,81 +19,51 @@ class FogSimulation:
         # Koschmieder近似（5%对比阈值）: MOR = ln(20)/alpha
         # 使用ln(20)可与常见LiDAR雾仿真设置保持一致
         self.alpha = np.log(20.0) / self.visibility
+        # TripleMixer风格soft target中的后向散射系数beta与MOR成反比
+        # 这里用保守默认值（对应论文/代码中的beta_min量级）
+        self.beta = 0.023 / max(self.visibility, 1.0)
 
     def _attenuate(self, pts):
         dist = get_lidar_distance(pts)
         if self.fog_type == 'inhomogeneous':
-            a = self.alpha * np.clip(1 + 0.3 * np.random.randn(len(dist)),
-                                     0.3, 2.0)
+            alpha = self.alpha * np.clip(1 + 0.3 * np.random.randn(len(dist)),
+                                         0.3, 2.0)
         else:
-            a = self.alpha
-        att = np.exp(-2 * a * dist)
+            alpha = np.full(len(dist), self.alpha, dtype=np.float32)
+
+        # hard target: 与TripleMixer中的 P_R_fog_hard 一致（I <- I * exp(-2αr)）
+        att = np.exp(-2 * alpha * dist)
         orig_int = pts[:, 3].copy()
-        pts[:, 3] *= att
+        pts[:, 3] = np.clip(pts[:, 3] * att, 0, 1)
+        return pts, dist, orig_int
 
-        rho = np.clip(orig_int, 0.01, 1.0)
-        recv = rho / (dist ** 2 + 1e-6) * att
-        recv_n = recv / (np.max(recv) + 1e-10)
-        keep = (recv_n > 0.005) & (np.random.uniform(0, 1, len(pts)) < 0.95)
-        return pts[keep], dist[keep], att[keep]
+    def _soft_backscatter(self, pts, dist, orig_int):
+        """
+        TripleMixer中的soft target核心行为：
+        - 若后向散射回波强于hard target回波，则把点拉回更近距离并替换强度
+        """
+        if len(pts) == 0:
+            return pts
 
-    def _fog_noise(self, pts, dist, att):
-        n = int(len(pts) * min(0.3 / self.visibility * 100, 0.15))
-        if n == 0:
-            return np.empty((0, 4), dtype=np.float32)
-        n_ray, n_rand = int(n * 0.7), n - int(n * 0.7)
-        parts = []
+        # 用Beta分布近似积分表给出的fog_distance/r_0
+        ratio = np.random.beta(2, 5, len(pts))
+        fog_dist = np.clip(dist * ratio, 0.5, np.minimum(dist, self.lidar_range))
 
-        if n_ray > 0 and len(pts) > 0:
-            idx = np.random.choice(len(pts), min(n_ray, len(pts)),
-                                   replace=n_ray > len(pts))
-            ratio = np.random.beta(2, 5, len(idx))
-            fd = dist[idx] * ratio
-            d = pts[idx, :3] / (dist[idx, None] + 1e-6)
-            xyz = d * fd[:, None]
-            fi = self.alpha * np.exp(-2 * self.alpha * fd)
-            fi = np.clip(fi / (np.max(fi) + 1e-10) * 0.3, 0, 0.4)
-            parts.append(np.column_stack([xyz, fi]))
+        # surrogate fog response（原实现依赖预计算积分表，这里用解析近似）
+        fog_resp = orig_int * (dist ** 2) * self.beta * np.exp(-2 * self.alpha * fog_dist)
+        fog_resp = np.clip(fog_resp, 0, 1)
 
-        if n_rand > 0:
-            r = np.clip(np.random.exponential(self.visibility / 5, n_rand),
-                        0.5, min(self.visibility, self.lidar_range))
-            az = np.random.uniform(-np.pi, np.pi, n_rand)
-            el = np.random.uniform(np.radians(-24.8), np.radians(2.0), n_rand)
-            parts.append(np.stack([
-                r * np.cos(el) * np.cos(az),
-                r * np.cos(el) * np.sin(az),
-                r * np.sin(el),
-                np.clip(np.random.exponential(0.05, n_rand), 0, 0.2)
-            ], axis=1))
-
-        return np.vstack(parts).astype(np.float32) if parts else np.empty((0, 4), dtype=np.float32)
-
-    def _curtain(self):
-        if self.visibility > 200:
-            return np.empty((0, 4), dtype=np.float32)
-        n = int(200 * (200 / self.visibility))
-        cd = self.visibility * np.random.uniform(0.5, 1.0)
-        # 雾幕应是“局部墙状”结构，而不是环形壳层:
-        # 保持约90°角宽，并随机其中心方位，兼顾360°场景与局部性
-        center_az = np.random.uniform(-np.pi, np.pi)
-        az = center_az + np.random.uniform(-np.pi / 4, np.pi / 4, n)
-        az = (az + np.pi) % (2 * np.pi) - np.pi
-        el = np.random.uniform(np.radians(-20), np.radians(2.0), n)
-        r = np.clip(cd + np.random.normal(0, 2.0, n), cd * 0.8, cd * 1.2)
-        return np.stack([
-            r * np.cos(el) * np.cos(az),
-            r * np.cos(el) * np.sin(az),
-            r * np.sin(el),
-            np.random.uniform(0.02, 0.15, n)
-        ], axis=1).astype(np.float32)
+        replace = fog_resp > pts[:, 3]
+        if np.any(replace):
+            direction = pts[:, :3] / (dist[:, None] + 1e-6)
+            pts[replace, :3] = direction[replace] * fog_dist[replace, None]
+            pts[replace, 3] = fog_resp[replace]
+        return pts
 
     def simulate(self, points):
         pts = points.copy()
-        pts, dist, att = self._attenuate(pts)
-        for arr in [self._fog_noise(pts, dist, att), self._curtain()]:
-            if len(arr) > 0:
-                pts = np.vstack([pts, arr])
+        pts, dist, orig_int = self._attenuate(pts)
+        pts = self._soft_backscatter(pts, dist, orig_int)
         pts[:, 3] = np.clip(pts[:, 3], 0, 1)
         return pts.astype(np.float32)
 
