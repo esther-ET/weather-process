@@ -45,7 +45,7 @@ class SnowSimulation:
         parts = []
         if n_near > 0:
             r = np.clip(np.random.exponential(5.0, n_near), 0.5, 15.0)
-            az = np.random.uniform(-np.pi / 2, np.pi / 2, n_near)
+            az = np.random.uniform(-np.pi, np.pi, n_near)
             el = np.random.uniform(np.radians(-24.8), np.radians(2.0), n_near)
             parts.append(np.stack([
                 r * np.cos(el) * np.cos(az),
@@ -55,7 +55,7 @@ class SnowSimulation:
             ], axis=1))
         if n_far > 0:
             r = np.random.uniform(15.0, 60.0, n_far)
-            az = np.random.uniform(-np.pi / 2, np.pi / 2, n_far)
+            az = np.random.uniform(-np.pi, np.pi, n_far)
             el = np.random.uniform(np.radians(-24.8), np.radians(2.0), n_far)
             x = r * np.cos(el) * np.cos(az) + np.random.normal(0, 0.1, n_far)
             y = r * np.cos(el) * np.sin(az) + np.random.normal(0, 0.1, n_far)
@@ -71,7 +71,7 @@ class SnowSimulation:
         parts = []
         for _ in range(nc):
             cr = np.random.uniform(1, 10)
-            caz = np.random.uniform(-np.pi / 2, np.pi / 2)
+            caz = np.random.uniform(-np.pi, np.pi)
             cel = np.random.uniform(np.radians(-15), np.radians(2))
             cx = cr * np.cos(cel) * np.cos(caz)
             cy = cr * np.cos(cel) * np.sin(caz)
