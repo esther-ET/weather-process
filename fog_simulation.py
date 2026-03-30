@@ -16,7 +16,9 @@ class FogSimulation:
         self.visibility = visibility
         self.fog_type = fog_type
         self.lidar_range = 120.0
-        self.alpha = 3.912 / self.visibility
+        # Koschmieder近似（5%对比阈值）: MOR = ln(20)/alpha
+        # 使用ln(20)可与常见LiDAR雾仿真设置保持一致
+        self.alpha = np.log(20.0) / self.visibility
 
     def _attenuate(self, pts):
         dist = get_lidar_distance(pts)
@@ -56,7 +58,7 @@ class FogSimulation:
         if n_rand > 0:
             r = np.clip(np.random.exponential(self.visibility / 5, n_rand),
                         0.5, min(self.visibility, self.lidar_range))
-            az = np.random.uniform(-np.pi / 2, np.pi / 2, n_rand)
+            az = np.random.uniform(-np.pi, np.pi, n_rand)
             el = np.random.uniform(np.radians(-24.8), np.radians(2.0), n_rand)
             parts.append(np.stack([
                 r * np.cos(el) * np.cos(az),
@@ -72,7 +74,7 @@ class FogSimulation:
             return np.empty((0, 4), dtype=np.float32)
         n = int(200 * (200 / self.visibility))
         cd = self.visibility * np.random.uniform(0.5, 1.0)
-        az = np.random.uniform(-np.pi / 4, np.pi / 4, n)
+        az = np.random.uniform(-np.pi, np.pi, n)
         el = np.random.uniform(np.radians(-20), np.radians(2.0), n)
         r = np.clip(cd + np.random.normal(0, 2.0, n), cd * 0.8, cd * 1.2)
         return np.stack([

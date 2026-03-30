@@ -35,7 +35,8 @@ class RainSimulation:
         if n == 0:
             return np.empty((0, 4), dtype=np.float32)
         r = np.clip(np.random.exponential(15.0, n), 0.5, 50.0)
-        az = np.random.uniform(-np.pi / 2, np.pi / 2, n)
+        # KITTI Velodyne bin是360°扫描，噪声方位角应覆盖全周
+        az = np.random.uniform(-np.pi, np.pi, n)
         el = np.random.uniform(np.radians(-24.8), np.radians(2.0), n)
         x = r * np.cos(el) * np.cos(az)
         y = r * np.cos(el) * np.sin(az)
