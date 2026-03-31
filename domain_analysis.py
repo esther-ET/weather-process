@@ -357,7 +357,7 @@ def run_domain_analysis(clean_dir, weather_dirs, output_dir, max_frames=200):
 
     # 4. 逐帧统计 + 雷达图
     print("\n[4/4] Computing per-domain statistics...")
-    from visualize_weather import compute_statistics
+    from vis_and_diff import compute_statistics
 
     aggregated_stats = OrderedDict()
     for wname, wdir in weather_dirs.items():
