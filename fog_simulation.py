@@ -1,71 +1,213 @@
 """
-fog_simulation.py - 雾天点云模拟（支持随机参数）
+fog_simulation.py - 雾天点云模拟（与 LiDAR_fog_sim 对齐）
 输出: 4维 (x, y, z, intensity)
 """
 
-import numpy as np
+import copy
 import os
+import pickle
+from pathlib import Path
+
+import numpy as np
 from tqdm import tqdm
-from utils import (load_kitti_points, save_kitti_points,
-                   get_lidar_distance, sample_visibility)
+
+from utils import load_kitti_points, save_kitti_points, sample_visibility
+
+
+RNG = np.random.default_rng(seed=42)
+AVAILABLE_TAU_HS = [20]
+
+
+class ParameterSet:
+    """LiDAR_fog_sim 中使用的参数集合（保留核心参数）。"""
+
+    def __init__(self, **kwargs):
+        # soft target / fog
+        self.alpha = 0.06
+        self.mor = np.log(20) / self.alpha
+        self.beta = 0.046 / self.mor
+
+        # hard target
+        self.gamma = 0.000001
+        self.beta_0 = self.gamma / np.pi
+
+        # sensor params
+        self.p_0 = 80
+        self.tau_h = 2e-8
+        self.a_r = 0.25
+        self.l_r = 0.05
+        self.c_a = 299792458.0 * self.l_r * self.a_r / 2
+
+        self.__dict__.update(kwargs)
 
 
 class FogSimulation:
-    def __init__(self, visibility=500.0, fog_type='uniform'):
-        """visibility: m, 建议范围 [30, 2000]"""
-        self.visibility = visibility
+    def __init__(self, visibility=500.0, fog_type='uniform',
+                 integral_root=None, noise=10, noise_variant='v1',
+                 hard=True, soft=True):
+        """
+        Args:
+            visibility: 能见度（米）
+            fog_type: uniform/inhomogeneous
+            integral_root: 积分查表目录，默认使用 weather-process/integral_lookup_tables/original
+            noise/noise_variant/hard/soft: 与 LiDAR_fog_sim 的 simulate_fog 参数语义一致
+        """
+        self.visibility = max(float(visibility), 1e-6)
         self.fog_type = fog_type
-        self.lidar_range = 120.0
-        # Koschmieder近似（5%对比阈值）: MOR = ln(20)/alpha
-        # 使用ln(20)可与常见LiDAR雾仿真设置保持一致
-        self.alpha = np.log(20.0) / self.visibility
-        # TripleMixer风格soft target中的后向散射系数beta与MOR成反比
-        # 这里用保守默认值（对应论文/代码中的beta_min量级）
-        self.beta = 0.023 / max(self.visibility, 1.0)
+        self.noise = int(noise)
+        self.noise_variant = noise_variant
+        self.hard = hard
+        self.soft = soft
+        self._warned_missing_integral = False
 
-    def _attenuate(self, pts):
-        dist = get_lidar_distance(pts)
-        if self.fog_type == 'inhomogeneous':
-            alpha = self.alpha * np.clip(1 + 0.3 * np.random.randn(len(dist)),
-                                         0.3, 2.0)
-        else:
-            alpha = np.full(len(dist), self.alpha, dtype=np.float32)
+        alpha = np.log(20.0) / self.visibility
+        self.param_set = ParameterSet(
+            alpha=alpha,
+            mor=np.log(20.0) / alpha,
+            beta=0.046 / (np.log(20.0) / alpha),
+        )
 
-        # hard target: 与TripleMixer中的 P_R_fog_hard 一致（I <- I * exp(-2αr)）
-        att = np.exp(-2 * alpha * dist)
-        orig_int = pts[:, 3].copy()
-        pts[:, 3] = np.clip(pts[:, 3] * att, 0, 1)
-        return pts, dist, orig_int
+        if integral_root is None:
+            integral_root = (
+                Path(__file__).resolve().parent
+                / 'integral_lookup_tables'
+                / 'original'
+            )
+        self.integral_path = Path(integral_root)
+        self._integral_dict = None
 
-    def _soft_backscatter(self, pts, dist, orig_int):
-        """
-        TripleMixer中的soft target核心行为：
-        - 若后向散射回波强于hard target回波，则把点拉回更近距离并替换强度
-        """
-        if len(pts) == 0:
-            return pts
+    def _get_available_alphas(self):
+        alphas = []
+        if not self.integral_path.exists():
+            return alphas
+        for file in os.listdir(self.integral_path):
+            if file.endswith('.pickle'):
+                alpha = file.split('_')[-1].replace('.pickle', '')
+                try:
+                    alphas.append(float(alpha))
+                except ValueError:
+                    continue
+        return sorted(alphas)
 
-        # 用Beta分布近似积分表给出的fog_distance/r_0
-        ratio = np.random.beta(2, 5, len(pts))
-        fog_dist = np.clip(dist * ratio, 0.5, np.minimum(dist, self.lidar_range))
+    def _get_integral_dict(self):
+        if self._integral_dict is not None:
+            return self._integral_dict
 
-        # surrogate fog response（原实现依赖预计算积分表，这里用解析近似）
-        fog_resp = orig_int * (dist ** 2) * self.beta * np.exp(-2 * self.alpha * fog_dist)
-        fog_resp = np.clip(fog_resp, 0, 1)
+        alphas = self._get_available_alphas()
+        if not alphas:
+            if not self._warned_missing_integral:
+                print(f"[FogSimulation] WARNING: integral table not found in {self.integral_path}; soft fog disabled.")
+                self._warned_missing_integral = True
+            return None
 
-        replace = fog_resp > pts[:, 3]
-        if np.any(replace):
-            direction = pts[:, :3] / (dist[:, None] + 1e-6)
-            pts[replace, :3] = direction[replace] * fog_dist[replace, None]
-            pts[replace, 3] = fog_resp[replace]
+        p = self.param_set
+        alpha = min(alphas, key=lambda x: abs(x - p.alpha))
+        tau_h = min(AVAILABLE_TAU_HS, key=lambda x: abs(x - int(p.tau_h * 1e9)))
+
+        filename = self.integral_path / (
+            f'integral_0m_to_200m_stepsize_0.1m_tau_h_{tau_h}ns_alpha_{alpha}.pickle'
+        )
+        if not filename.exists():
+            return None
+
+        with open(filename, 'rb') as f:
+            self._integral_dict = pickle.load(f)
+        return self._integral_dict
+
+    def _prepare_intensity(self, points):
+        """兼容 [0,1] 与 [0,255] 强度输入，内部统一到 [0,255]。"""
+        pts = points.copy().astype(np.float32)
+        max_i = float(np.max(pts[:, 3])) if len(pts) > 0 else 1.0
+        use_unit_scale = max_i <= 1.0 + 1e-6
+        if use_unit_scale:
+            pts[:, 3] *= 255.0
+        return pts, use_unit_scale
+
+    def _recover_intensity(self, points, use_unit_scale):
+        pts = points.copy().astype(np.float32)
+        if use_unit_scale:
+            pts[:, 3] = np.clip(pts[:, 3] / 255.0, 0.0, 1.0)
         return pts
 
+    def _p_r_fog_hard(self, points):
+        p = self.param_set
+        pc = points.copy()
+        r_0 = np.linalg.norm(pc[:, 0:3], axis=1)
+
+        if self.fog_type == 'inhomogeneous':
+            alpha_vec = p.alpha * np.clip(1.0 + 0.3 * np.random.randn(len(r_0)), 0.3, 2.0)
+            pc[:, 3] = np.round(np.exp(-2.0 * alpha_vec * r_0) * pc[:, 3])
+        else:
+            pc[:, 3] = np.round(np.exp(-2.0 * p.alpha * r_0) * pc[:, 3])
+        return pc
+
+    def _p_r_fog_soft(self, pc_hard, original_intensity):
+        p = self.param_set
+        integral_dict = self._get_integral_dict()
+        if integral_dict is None:
+            return pc_hard
+
+        augmented_pc = np.zeros(pc_hard.shape, dtype=np.float32)
+        r_zeros = np.linalg.norm(pc_hard[:, 0:3], axis=1)
+        r_noise = 10
+
+        for i, r_0 in enumerate(r_zeros):
+            key = float(str(round(float(r_0), 1)))
+            fog_distance, fog_response = integral_dict[min(key, 200)]
+
+            fog_response = fog_response * original_intensity[i] * (r_0 ** 2) * p.beta / p.beta_0
+            fog_response = min(fog_response, 255)
+
+            if fog_response > pc_hard[i, 3]:
+                scaling_factor = fog_distance / max(r_0, 1e-6)
+                augmented_pc[i, 0] = pc_hard[i, 0] * scaling_factor
+                augmented_pc[i, 1] = pc_hard[i, 1] * scaling_factor
+                augmented_pc[i, 2] = pc_hard[i, 2] * scaling_factor
+                augmented_pc[i, 3] = fog_response
+
+                if self.noise > 0:
+                    if self.noise_variant == 'v1':
+                        distance_noise = RNG.uniform(low=r_0 - self.noise, high=r_0 + self.noise, size=1)[0]
+                        noise_factor = r_0 / max(distance_noise, 1e-6)
+                    elif self.noise_variant == 'v2':
+                        power = RNG.uniform(low=-1, high=1, size=1)[0]
+                        noise_factor = max(1.0, self.noise / 5) ** power
+                    elif self.noise_variant == 'v3':
+                        power = RNG.uniform(low=-0.5, high=1, size=1)[0]
+                        noise_factor = max(1.0, self.noise * 4 / 10) ** power
+                    elif self.noise_variant == 'v4':
+                        additive = r_noise * RNG.beta(a=2, b=20, size=1)[0]
+                        new_dist = fog_distance + additive
+                        noise_factor = new_dist / max(fog_distance, 1e-6)
+                    else:
+                        raise NotImplementedError(
+                            f"noise variant '{self.noise_variant}' is not implemented"
+                        )
+
+                    augmented_pc[i, 0] *= noise_factor
+                    augmented_pc[i, 1] *= noise_factor
+                    augmented_pc[i, 2] *= noise_factor
+            else:
+                augmented_pc[i] = pc_hard[i]
+
+        return augmented_pc
+
     def simulate(self, points):
-        pts = points.copy()
-        pts, dist, orig_int = self._attenuate(pts)
-        pts = self._soft_backscatter(pts, dist, orig_int)
-        pts[:, 3] = np.clip(pts[:, 3], 0, 1)
-        return pts.astype(np.float32)
+        if len(points) == 0:
+            return points.astype(np.float32)
+
+        pts_255, use_unit_scale = self._prepare_intensity(points)
+        original_intensity = copy.deepcopy(pts_255[:, 3])
+        augmented_pc = copy.deepcopy(pts_255)
+
+        if self.hard:
+            augmented_pc = self._p_r_fog_hard(augmented_pc)
+        if self.soft:
+            augmented_pc = self._p_r_fog_soft(augmented_pc, original_intensity)
+
+        augmented_pc[:, 3] = np.clip(augmented_pc[:, 3], 0.0, 255.0)
+        out = self._recover_intensity(augmented_pc, use_unit_scale)
+        return out.astype(np.float32)
 
 
 def _save_param_log(output_dir, param_log, weather_type):

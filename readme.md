@@ -1,4 +1,3 @@
-# 参数说明
 雨mm/h
 毛毛雨   0.1 - 1.0
 小雨     1.0 - 5.0
@@ -37,7 +36,7 @@ sample_mode='category'  分类采样 → 先等概率选等级(light/moderate/he
 python generate_all_weather.py \
     --input_dir /mnt/nvme0n1p2/data/datasets/KITTI2/object/training/velodyne \
     --output_dir /mnt/nvme0n1p2/data/datasets/kitti_weather_random \
-    --weather rain \
+    --weather fog \
     --random_params \
     --sample_mode log \
     --seed 42
@@ -94,3 +93,17 @@ compute_statistics(clean_pts, weather_pts) 的作用：计算 clean 与 weather 
 强度分布差异（均值差、KL、JS、Wasserstein、KS）
 空间分布差异（MMD_xyz、MMD_intensity）
 近距噪声比例与远距保留率（near_point_ratio_*、far_point_retention
+
+
+# 参数说明
+## 雾积分表（本地化，无外部耦合）
+- 雾 soft target 需要积分查表文件，默认目录：`/home/ubuntu/SWW/code/weather-process/integral_lookup_tables/original`
+- 文件名格式：`integral_0m_to_200m_stepsize_0.1m_tau_h_20ns_alpha_*.pickle`
+- 若目录为空，代码会给出 warning，并退化为仅 hard attenuation（仍可运行）
+
+如果你本机已有 LiDAR_fog_sim 的积分表，可一次性复制到 weather-process：
+```bash
+mkdir -p /home/ubuntu/SWW/code/weather-process/integral_lookup_tables/original
+cp /home/ubuntu/SWW/code/LiDAR_snow_sim/lib/LiDAR_fog_sim/integral_lookup_tables/original/*.pickle \
+  /home/ubuntu/SWW/code/weather-process/integral_lookup_tables/original/
+```
