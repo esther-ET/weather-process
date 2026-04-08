@@ -110,7 +110,9 @@ def resolve_frame_list(input_dir, frames=None, frame_range=None,
 # ============ 单帧处理函数 ============
 
 def process_single_frame(input_path, output_path, weather_type,
-                         params, random_params=False, sample_mode='log'):
+                         params, random_params=False, sample_mode='log',
+                         rain_backend='auto', lisa_path=None,
+                         snow_backend='auto', lidar_snow_sim_path=None):
     """
     处理单帧点云
 
@@ -129,13 +131,15 @@ def process_single_frame(input_path, output_path, weather_type,
 
     if weather_type == 'rain':
         rr = sample_rain_rate(sample_mode) if random_params else params.get('rain_rate', 10.0)
-        sim = RainSimulation(rain_rate=rr)
+        sim = RainSimulation(rain_rate=rr, backend=rain_backend, lisa_path=lisa_path)
         result = sim.simulate(points)
         actual_params = {'rain_rate': round(rr, 2)}
 
     elif weather_type == 'snow':
         sr = sample_snowfall_rate(sample_mode) if random_params else params.get('snowfall_rate', 2.5)
-        sim = SnowSimulation(snowfall_rate=sr)
+        sim = SnowSimulation(snowfall_rate=sr,
+                             backend=snow_backend,
+                             lidar_snow_sim_path=lidar_snow_sim_path)
         result = sim.simulate(points)
         actual_params = {'snowfall_rate': round(sr, 2)}
 
@@ -164,7 +168,9 @@ def process_single_frame(input_path, output_path, weather_type,
 def process_selected_frames(input_dir, output_dir, weather_type,
                             frame_list, params=None,
                             random_params=False, sample_mode='log',
-                            num_workers=1):
+                            num_workers=1,
+                            rain_backend='auto', lisa_path=None,
+                            snow_backend='auto', lidar_snow_sim_path=None):
     """
     处理选定的帧列表
 
@@ -199,7 +205,9 @@ def process_selected_frames(input_dir, output_dir, weather_type,
             output_path = os.path.join(output_dir, fname)
             actual = process_single_frame(
                 input_path, output_path, weather_type,
-                params, random_params, sample_mode
+                params, random_params, sample_mode,
+                rain_backend=rain_backend, lisa_path=lisa_path,
+                snow_backend=snow_backend, lidar_snow_sim_path=lidar_snow_sim_path
             )
             param_log[fname] = actual
     else:
@@ -213,7 +221,9 @@ def process_selected_frames(input_dir, output_dir, weather_type,
                 future = executor.submit(
                     process_single_frame,
                     input_path, output_path, weather_type,
-                    params, random_params, sample_mode
+                    params, random_params, sample_mode,
+                    rain_backend, lisa_path,
+                    snow_backend, lidar_snow_sim_path
                 )
                 futures[future] = fname
 
@@ -234,7 +244,9 @@ def process_selected_frames(input_dir, output_dir, weather_type,
 def process_mixed_weather(input_dir, output_dir, frame_list,
                           weather_types=None, weather_weights=None,
                           random_params=True, sample_mode='log',
-                          num_workers=1, seed=None):
+                          num_workers=1, seed=None,
+                          rain_backend='auto', lisa_path=None,
+                          snow_backend='auto', lidar_snow_sim_path=None):
     """
     混合天气模式: 每帧随机分配一种天气类型
 
@@ -271,7 +283,9 @@ def process_mixed_weather(input_dir, output_dir, frame_list,
 
         actual = process_single_frame(
             input_path, output_path, wtype,
-            {}, random_params, sample_mode
+            {}, random_params, sample_mode,
+            rain_backend=rain_backend, lisa_path=lisa_path,
+            snow_backend=snow_backend, lidar_snow_sim_path=lidar_snow_sim_path
         )
         actual['weather_type'] = wtype
         param_log[fname] = actual
@@ -445,6 +459,16 @@ python generate_all_weather.py \\
                         choices=['uniform', 'log', 'category'])
     parser.add_argument("--seed", type=int, default=None,
                         help="随机种子")
+    parser.add_argument("--rain_backend", type=str, default='auto',
+                        choices=['auto', 'heuristic', 'lisa'],
+                        help="雨模拟后端：auto(优先LISA)/heuristic/lisa")
+    parser.add_argument("--lisa_path", type=str, default=None,
+                        help="LISA仓库路径(应包含 atmos_models.py)")
+    parser.add_argument("--snow_backend", type=str, default='auto',
+                        choices=['auto', 'heuristic', 'lidar_snow_sim'],
+                        help="雪模拟后端：auto(优先LiDAR_snow_sim)/heuristic/lidar_snow_sim")
+    parser.add_argument("--lidar_snow_sim_path", type=str, default=None,
+                        help="LiDAR_snow_sim 中 simulation.py 所在目录")
 
     # ===== 混合天气选项 =====
     parser.add_argument("--weather_weights", nargs='+', type=float, default=None,
@@ -516,7 +540,11 @@ python generate_all_weather.py \\
             random_params=args.random_params or True,
             sample_mode=args.sample_mode,
             num_workers=args.num_workers,
-            seed=args.seed
+            seed=args.seed,
+            rain_backend=args.rain_backend,
+            lisa_path=args.lisa_path,
+            snow_backend=args.snow_backend,
+            lidar_snow_sim_path=args.lidar_snow_sim_path
         )
         save_param_log(out_dir, param_log, 'mixed')
 
@@ -540,7 +568,11 @@ python generate_all_weather.py \\
                 param_log = process_selected_frames(
                     args.input_dir, out_dir, w, frame_list,
                     random_params=True, sample_mode=args.sample_mode,
-                    num_workers=args.num_workers
+                    num_workers=args.num_workers,
+                    rain_backend=args.rain_backend,
+                    lisa_path=args.lisa_path,
+                    snow_backend=args.snow_backend,
+                    lidar_snow_sim_path=args.lidar_snow_sim_path
                 )
                 save_param_log(out_dir, param_log, f'{w}_random')
 
@@ -560,7 +592,11 @@ python generate_all_weather.py \\
                     param_log = process_selected_frames(
                         args.input_dir, out_dir, w, frame_list,
                         params=params, random_params=False,
-                        num_workers=args.num_workers
+                        num_workers=args.num_workers,
+                        rain_backend=args.rain_backend,
+                        lisa_path=args.lisa_path,
+                        snow_backend=args.snow_backend,
+                        lidar_snow_sim_path=args.lidar_snow_sim_path
                     )
                     save_param_log(out_dir, param_log, f'{w}_{s}')
 

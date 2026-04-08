@@ -5,18 +5,65 @@ rain_simulation.py - 雨天点云模拟（支持随机参数）
 
 import numpy as np
 import os
+import warnings
+import importlib
+import sys
+from pathlib import Path
 from tqdm import tqdm
 from utils import (load_kitti_points, save_kitti_points,
                    get_lidar_distance, sample_rain_rate)
 
 
 class RainSimulation:
-    def __init__(self, rain_rate=10.0):
+    def __init__(self, rain_rate=10.0, backend='auto', lisa_path=None):
         """rain_rate: mm/h, 建议范围 [1, 80]"""
         self.rain_rate = rain_rate
+        self.backend = backend
+        self.lisa_path = lisa_path
         self.lidar_range = 120.0
         self.d0 = 1.238 * self.rain_rate ** 0.182
         self.lambda_mp = 4.1 * self.rain_rate ** (-0.21)
+        self._lisa = None
+        self._resolved_backend = self._resolve_backend()
+
+    def _resolve_backend(self):
+        if self.backend == 'heuristic':
+            return 'heuristic'
+
+        lisa_cls = self._import_lisa()
+        if lisa_cls is not None:
+            self._lisa = lisa_cls(atm_model='rain')
+            return 'lisa'
+
+        if self.backend == 'lisa':
+            raise ImportError(
+                "backend='lisa' but LISA is not importable. "
+                "Set --lisa_path or export LISA_PATH to the LISA repository root."
+            )
+
+        warnings.warn(
+            "LISA backend not found, falling back to heuristic rain simulation.",
+            RuntimeWarning
+        )
+        return 'heuristic'
+
+    def _import_lisa(self):
+        search_paths = []
+        if self.lisa_path:
+            search_paths.append(self.lisa_path)
+        env_lisa_path = os.getenv('LISA_PATH')
+        if env_lisa_path:
+            search_paths.append(env_lisa_path)
+
+        for p in search_paths:
+            if p and p not in sys.path:
+                sys.path.insert(0, str(Path(p).expanduser()))
+
+        try:
+            module = importlib.import_module('atmos_models')
+            return getattr(module, 'LISA')
+        except Exception:
+            return None
 
     def _extinction(self):
         k, a = 0.01, 0.65
@@ -55,7 +102,18 @@ class RainSimulation:
             pts[mask, 3] = np.clip(pts[mask, 3] * s, 0, 1)
         return pts
 
-    def simulate(self, points):
+    def _simulate_lisa(self, points, labels=None):
+        if labels is None:
+            labels = np.zeros((points.shape[0], 1), dtype=np.int32)
+        rain_points, _ = self._lisa.augment_mc(points, labels, self.rain_rate)
+        out = np.asarray(rain_points[:, :4], dtype=np.float32)
+        out[:, 3] = np.clip(out[:, 3], 0, 1)
+        return out
+
+    def simulate(self, points, labels=None):
+        if self._resolved_backend == 'lisa':
+            return self._simulate_lisa(points, labels=labels)
+
         pts = points.copy()
         pts = self._attenuate(pts)
         pts = self._wet_ground(pts)
@@ -67,7 +125,8 @@ class RainSimulation:
 
 
 def process_kitti_rain(input_dir, output_dir, rain_rate=None,
-                       random_params=False, sample_mode='log', seed=None):
+                       random_params=False, sample_mode='log', seed=None,
+                       backend='auto', lisa_path=None):
     """
     Args:
         rain_rate: 固定降雨率 (random_params=False时使用)
@@ -98,7 +157,7 @@ def process_kitti_rain(input_dir, output_dir, rain_rate=None,
 
         param_log[fname] = {'rain_rate': round(rr, 2)}
 
-        sim = RainSimulation(rain_rate=rr)
+        sim = RainSimulation(rain_rate=rr, backend=backend, lisa_path=lisa_path)
         points = load_kitti_points(os.path.join(input_dir, fname))
         result = sim.simulate(points)
         save_kitti_points(result, os.path.join(output_dir, fname))
@@ -134,6 +193,11 @@ if __name__ == "__main__":
                         help="每帧随机采样降雨率")
     parser.add_argument("--sample_mode", type=str, default='log',
                         choices=['uniform', 'log', 'category'])
+    parser.add_argument("--backend", type=str, default='auto',
+                        choices=['auto', 'heuristic', 'lisa'],
+                        help="rain backend: auto(优先LISA), heuristic(当前启发式), lisa(强制LISA)")
+    parser.add_argument("--lisa_path", type=str, default=None,
+                        help="LISA仓库路径(应包含 atmos_models.py)")
     parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args()
 
@@ -141,4 +205,6 @@ if __name__ == "__main__":
                        rain_rate=args.rain_rate,
                        random_params=args.random_params,
                        sample_mode=args.sample_mode,
+                       backend=args.backend,
+                       lisa_path=args.lisa_path,
                        seed=args.seed)
