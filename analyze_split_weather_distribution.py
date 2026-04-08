@@ -9,7 +9,7 @@ python analyze_split_weather_distribution.py \
   --weather_root /mnt/nvme0n1p2/data/datasets/kitti_weather_random \
   --split_dir /mnt/nvme0n1p2/data/datasets/KITTI2_weather_eval/fog/ImageSets \
   --weather fog \
-  --output_dir /mnt/nvme0n1p2/data/datasets/kitti_weather_random/analysis
+  --output_dir  /home/ubuntu/SWW/analysis/split_vis
 """
 
 import argparse
