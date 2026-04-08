@@ -112,7 +112,9 @@ def resolve_frame_list(input_dir, frames=None, frame_range=None,
 def process_single_frame(input_path, output_path, weather_type,
                          params, random_params=False, sample_mode='log',
                          rain_backend='auto', lisa_path=None,
-                         snow_backend='auto', lidar_snow_sim_path=None):
+                         snow_backend='auto', lidar_snow_sim_path=None,
+                         particle_file_prefix=None, beam_divergence=0.35,
+                         only_camera_fov=False, noise_floor=0.7, root_path=None):
     """
     处理单帧点云
 
@@ -139,7 +141,12 @@ def process_single_frame(input_path, output_path, weather_type,
         sr = sample_snowfall_rate(sample_mode) if random_params else params.get('snowfall_rate', 2.5)
         sim = SnowSimulation(snowfall_rate=sr,
                              backend=snow_backend,
-                             lidar_snow_sim_path=lidar_snow_sim_path)
+                             lidar_snow_sim_path=lidar_snow_sim_path,
+                             particle_file_prefix=particle_file_prefix,
+                             beam_divergence=beam_divergence,
+                             only_camera_fov=only_camera_fov,
+                             noise_floor=noise_floor,
+                             root_path=root_path)
         result = sim.simulate(points)
         actual_params = {'snowfall_rate': round(sr, 2)}
 
@@ -170,7 +177,9 @@ def process_selected_frames(input_dir, output_dir, weather_type,
                             random_params=False, sample_mode='log',
                             num_workers=1,
                             rain_backend='auto', lisa_path=None,
-                            snow_backend='auto', lidar_snow_sim_path=None):
+                            snow_backend='auto', lidar_snow_sim_path=None,
+                            particle_file_prefix=None, beam_divergence=0.35,
+                            only_camera_fov=False, noise_floor=0.7, root_path=None):
     """
     处理选定的帧列表
 
@@ -207,7 +216,9 @@ def process_selected_frames(input_dir, output_dir, weather_type,
                 input_path, output_path, weather_type,
                 params, random_params, sample_mode,
                 rain_backend=rain_backend, lisa_path=lisa_path,
-                snow_backend=snow_backend, lidar_snow_sim_path=lidar_snow_sim_path
+                snow_backend=snow_backend, lidar_snow_sim_path=lidar_snow_sim_path,
+                particle_file_prefix=particle_file_prefix, beam_divergence=beam_divergence,
+                only_camera_fov=only_camera_fov, noise_floor=noise_floor, root_path=root_path
             )
             param_log[fname] = actual
     else:
@@ -223,7 +234,9 @@ def process_selected_frames(input_dir, output_dir, weather_type,
                     input_path, output_path, weather_type,
                     params, random_params, sample_mode,
                     rain_backend, lisa_path,
-                    snow_backend, lidar_snow_sim_path
+                    snow_backend, lidar_snow_sim_path,
+                    particle_file_prefix, beam_divergence,
+                    only_camera_fov, noise_floor, root_path
                 )
                 futures[future] = fname
 
@@ -246,7 +259,9 @@ def process_mixed_weather(input_dir, output_dir, frame_list,
                           random_params=True, sample_mode='log',
                           num_workers=1, seed=None,
                           rain_backend='auto', lisa_path=None,
-                          snow_backend='auto', lidar_snow_sim_path=None):
+                          snow_backend='auto', lidar_snow_sim_path=None,
+                          particle_file_prefix=None, beam_divergence=0.35,
+                          only_camera_fov=False, noise_floor=0.7, root_path=None):
     """
     混合天气模式: 每帧随机分配一种天气类型
 
@@ -285,7 +300,9 @@ def process_mixed_weather(input_dir, output_dir, frame_list,
             input_path, output_path, wtype,
             {}, random_params, sample_mode,
             rain_backend=rain_backend, lisa_path=lisa_path,
-            snow_backend=snow_backend, lidar_snow_sim_path=lidar_snow_sim_path
+            snow_backend=snow_backend, lidar_snow_sim_path=lidar_snow_sim_path,
+            particle_file_prefix=particle_file_prefix, beam_divergence=beam_divergence,
+            only_camera_fov=only_camera_fov, noise_floor=noise_floor, root_path=root_path
         )
         actual['weather_type'] = wtype
         param_log[fname] = actual
@@ -469,6 +486,16 @@ python generate_all_weather.py \\
                         help="雪模拟后端：auto(优先LiDAR_snow_sim)/heuristic/lidar_snow_sim")
     parser.add_argument("--lidar_snow_sim_path", type=str, default=None,
                         help="LiDAR_snow_sim 中 simulation.py 所在目录")
+    parser.add_argument("--particle_file_prefix", type=str, default=None,
+                        help="LiDAR_snow_sim augment 必需参数，如 gunn_4.816236598076465_1.1574074074074074")
+    parser.add_argument("--beam_divergence", type=float, default=0.35,
+                        help="LiDAR_snow_sim beam_divergence (degree)")
+    parser.add_argument("--only_camera_fov", action='store_true',
+                        help="LiDAR_snow_sim only_camera_fov")
+    parser.add_argument("--noise_floor", type=float, default=0.7,
+                        help="LiDAR_snow_sim noise_floor")
+    parser.add_argument("--root_path", type=str, default=None,
+                        help="LiDAR_snow_sim root_path (如STF root)")
 
     # ===== 混合天气选项 =====
     parser.add_argument("--weather_weights", nargs='+', type=float, default=None,
@@ -544,7 +571,12 @@ python generate_all_weather.py \\
             rain_backend=args.rain_backend,
             lisa_path=args.lisa_path,
             snow_backend=args.snow_backend,
-            lidar_snow_sim_path=args.lidar_snow_sim_path
+            lidar_snow_sim_path=args.lidar_snow_sim_path,
+            particle_file_prefix=args.particle_file_prefix,
+            beam_divergence=args.beam_divergence,
+            only_camera_fov=args.only_camera_fov,
+            noise_floor=args.noise_floor,
+            root_path=args.root_path
         )
         save_param_log(out_dir, param_log, 'mixed')
 
@@ -572,7 +604,12 @@ python generate_all_weather.py \\
                     rain_backend=args.rain_backend,
                     lisa_path=args.lisa_path,
                     snow_backend=args.snow_backend,
-                    lidar_snow_sim_path=args.lidar_snow_sim_path
+                    lidar_snow_sim_path=args.lidar_snow_sim_path,
+                    particle_file_prefix=args.particle_file_prefix,
+                    beam_divergence=args.beam_divergence,
+                    only_camera_fov=args.only_camera_fov,
+                    noise_floor=args.noise_floor,
+                    root_path=args.root_path
                 )
                 save_param_log(out_dir, param_log, f'{w}_random')
 
@@ -596,7 +633,12 @@ python generate_all_weather.py \\
                         rain_backend=args.rain_backend,
                         lisa_path=args.lisa_path,
                         snow_backend=args.snow_backend,
-                        lidar_snow_sim_path=args.lidar_snow_sim_path
+                        lidar_snow_sim_path=args.lidar_snow_sim_path,
+                        particle_file_prefix=args.particle_file_prefix,
+                        beam_divergence=args.beam_divergence,
+                        only_camera_fov=args.only_camera_fov,
+                        noise_floor=args.noise_floor,
+                        root_path=args.root_path
                     )
                     save_param_log(out_dir, param_log, f'{w}_{s}')
 

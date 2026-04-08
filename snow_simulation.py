@@ -7,7 +7,6 @@ import numpy as np
 import os
 import warnings
 import importlib
-import inspect
 import sys
 from pathlib import Path
 from tqdm import tqdm
@@ -17,13 +16,20 @@ from utils import (load_kitti_points, save_kitti_points,
 
 class SnowSimulation:
     def __init__(self, snowfall_rate=2.5, terminal_velocity=1.0, snow_density=0.1,
-                 backend='auto', lidar_snow_sim_path=None):
+                 backend='auto', lidar_snow_sim_path=None,
+                 particle_file_prefix=None, beam_divergence=0.35,
+                 only_camera_fov=False, noise_floor=0.7, root_path=None):
         """snowfall_rate: mm/h 水当量, 建议范围 [0.5, 10]"""
         self.snowfall_rate = snowfall_rate
         self.terminal_velocity = terminal_velocity
         self.snow_density = snow_density
         self.backend = backend
         self.lidar_snow_sim_path = lidar_snow_sim_path
+        self.particle_file_prefix = particle_file_prefix
+        self.beam_divergence = beam_divergence
+        self.only_camera_fov = only_camera_fov
+        self.noise_floor = noise_floor
+        self.root_path = root_path
         self.lidar_range = 120.0
         self.d_snow = 2.0 + 0.5 * np.log(1 + self.snowfall_rate)
         self.snow_conc = self._concentration()
@@ -56,9 +62,11 @@ class SnowSimulation:
         search_paths = []
         if self.lidar_snow_sim_path:
             search_paths.append(self.lidar_snow_sim_path)
+            search_paths.append(str(Path(self.lidar_snow_sim_path).expanduser() / 'tools' / 'snowfall'))
         env_path = os.getenv('LIDAR_SNOW_SIM_PATH')
         if env_path:
             search_paths.append(env_path)
+            search_paths.append(str(Path(env_path).expanduser() / 'tools' / 'snowfall'))
 
         for p in search_paths:
             if p and p not in sys.path:
@@ -143,37 +151,51 @@ class SnowSimulation:
         return pts
 
     def _simulate_lidar_snow_sim(self, points):
-        candidates = ('augment', 'simulate', 'simulate_snow')
-        for name in candidates:
-            fn = getattr(self._snow_module, name, None)
-            if fn is None:
-                continue
-            try:
-                sig = inspect.signature(fn)
-                kwargs = {}
-                for p_name in sig.parameters:
-                    if p_name in ('points', 'pc', 'point_cloud', 'pointcloud'):
-                        kwargs[p_name] = points
-                    elif p_name in ('snowfall_rate', 'rate'):
-                        kwargs[p_name] = self.snowfall_rate
-                out = fn(**kwargs) if kwargs else fn(points)
-                if isinstance(out, tuple):
-                    out = out[0]
-                out = np.asarray(out, dtype=np.float32)
-                if out.ndim == 2 and out.shape[1] >= 4:
-                    out = out[:, :4]
-                    out[:, 3] = np.clip(out[:, 3], 0, 1)
-                    return out
-            except Exception:
-                continue
-        raise RuntimeError(
-            "Could not call LiDAR_snow_sim simulation entrypoint. "
-            "Expected one of: augment/simulate/simulate_snow."
+        fn = getattr(self._snow_module, 'augment', None)
+        if fn is None:
+            raise RuntimeError("LiDAR_snow_sim tools/snowfall/simulation.py missing augment(...) entrypoint.")
+
+        if points.ndim != 2 or points.shape[1] < 5:
+            raise ValueError(
+                "LiDAR_snow_sim augment expects Nx5 input (x,y,z,intensity,channel). "
+                f"Got shape={points.shape}. This is not a simple Nx4 API."
+            )
+        if not self.particle_file_prefix:
+            raise ValueError(
+                "LiDAR_snow_sim backend requires particle_file_prefix, e.g. "
+                "--particle_file_prefix gunn_4.816236598076465_1.1574074074074074"
+            )
+
+        stats, aug_pc = fn(
+            pc=points[:, :5],
+            particle_file_prefix=self.particle_file_prefix,
+            beam_divergence=self.beam_divergence,
+            shuffle=True,
+            show_progressbar=False,
+            only_camera_fov=self.only_camera_fov,
+            noise_floor=self.noise_floor,
+            root_path=self.root_path
         )
+        _ = stats
+        out = np.asarray(aug_pc[:, :4], dtype=np.float32)
+        max_i = float(np.max(points[:, 3])) if len(points) else 1.0
+        if max_i <= 1.0 + 1e-6 and np.max(out[:, 3]) > 1.0:
+            out[:, 3] = np.clip(out[:, 3] / 255.0, 0.0, 1.0)
+        else:
+            out[:, 3] = np.clip(out[:, 3], 0, 255 if np.max(out[:, 3]) > 1 else 1)
+        return out
 
     def simulate(self, points):
         if self._resolved_backend == 'lidar_snow_sim':
-            return self._simulate_lidar_snow_sim(points)
+            try:
+                return self._simulate_lidar_snow_sim(points)
+            except Exception as e:
+                if self.backend == 'lidar_snow_sim':
+                    raise
+                warnings.warn(
+                    f"LiDAR_snow_sim call failed ({e}), fallback to heuristic snow simulation.",
+                    RuntimeWarning
+                )
 
         pts = points.copy()
         pts = self._attenuate(pts)
@@ -200,7 +222,9 @@ def _save_param_log(output_dir, param_log, weather_type):
 
 def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
                        random_params=False, sample_mode='log', seed=None,
-                       backend='auto', lidar_snow_sim_path=None):
+                       backend='auto', lidar_snow_sim_path=None,
+                       particle_file_prefix=None, beam_divergence=0.35,
+                       only_camera_fov=False, noise_floor=0.7, root_path=None):
     if seed is not None:
         np.random.seed(seed)
     os.makedirs(output_dir, exist_ok=True)
@@ -219,7 +243,12 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
         sim = SnowSimulation(
             snowfall_rate=sr,
             backend=backend,
-            lidar_snow_sim_path=lidar_snow_sim_path
+            lidar_snow_sim_path=lidar_snow_sim_path,
+            particle_file_prefix=particle_file_prefix,
+            beam_divergence=beam_divergence,
+            only_camera_fov=only_camera_fov,
+            noise_floor=noise_floor,
+            root_path=root_path
         )
         points = load_kitti_points(os.path.join(input_dir, fname))
         result = sim.simulate(points)
@@ -243,6 +272,16 @@ if __name__ == "__main__":
                         help="snow backend: auto(优先LiDAR_snow_sim), heuristic(当前启发式), lidar_snow_sim(强制)")
     parser.add_argument("--lidar_snow_sim_path", type=str, default=None,
                         help="LiDAR_snow_sim 中 simulation.py 所在目录")
+    parser.add_argument("--particle_file_prefix", type=str, default=None,
+                        help="LiDAR_snow_sim augment 必需参数，如 gunn_4.816236598076465_1.1574074074074074")
+    parser.add_argument("--beam_divergence", type=float, default=0.35,
+                        help="LiDAR_snow_sim beam_divergence (degree)")
+    parser.add_argument("--only_camera_fov", action='store_true',
+                        help="LiDAR_snow_sim only_camera_fov")
+    parser.add_argument("--noise_floor", type=float, default=0.7,
+                        help="LiDAR_snow_sim noise_floor")
+    parser.add_argument("--root_path", type=str, default=None,
+                        help="LiDAR_snow_sim root_path (如STF root)")
     parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args()
     process_kitti_snow(args.input_dir, args.output_dir,
@@ -251,4 +290,9 @@ if __name__ == "__main__":
                        sample_mode=args.sample_mode,
                        backend=args.backend,
                        lidar_snow_sim_path=args.lidar_snow_sim_path,
+                       particle_file_prefix=args.particle_file_prefix,
+                       beam_divergence=args.beam_divergence,
+                       only_camera_fov=args.only_camera_fov,
+                       noise_floor=args.noise_floor,
+                       root_path=args.root_path,
                        seed=args.seed)

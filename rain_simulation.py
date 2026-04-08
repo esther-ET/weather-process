@@ -24,15 +24,26 @@ class RainSimulation:
         self.d0 = 1.238 * self.rain_rate ** 0.182
         self.lambda_mp = 4.1 * self.rain_rate ** (-0.21)
         self._lisa = None
+        self._lisa_impl = None
         self._resolved_backend = self._resolve_backend()
 
     def _resolve_backend(self):
         if self.backend == 'heuristic':
             return 'heuristic'
 
-        lisa_cls = self._import_lisa()
-        if lisa_cls is not None:
-            self._lisa = lisa_cls(atm_model='rain')
+        lisa_handle = self._import_lisa()
+        if lisa_handle is not None:
+            impl, lisa_cls = lisa_handle
+            self._lisa_impl = impl
+            if impl == 'legacy':
+                self._lisa = lisa_cls(atm_model='rain')
+            elif impl == 'python':
+                self._lisa = lisa_cls(mode='rain')
+            elif impl == 'pylisa':
+                lidar = importlib.import_module('pylisa').Lidar()
+                water = importlib.import_module('pylisa').Water()
+                rain = importlib.import_module('pylisa').MarshallPalmerRain()
+                self._lisa = lisa_cls(lidar, water, rain)
             return 'lisa'
 
         if self.backend == 'lisa':
@@ -51,19 +62,44 @@ class RainSimulation:
         search_paths = []
         if self.lisa_path:
             search_paths.append(self.lisa_path)
+            search_paths.append(str(Path(self.lisa_path).expanduser() / 'python'))
         env_lisa_path = os.getenv('LISA_PATH')
         if env_lisa_path:
             search_paths.append(env_lisa_path)
+            search_paths.append(str(Path(env_lisa_path).expanduser() / 'python'))
 
         for p in search_paths:
             if p and p not in sys.path:
                 sys.path.insert(0, str(Path(p).expanduser()))
 
+        # legacy python version: from atmos_models import LISA
         try:
             module = importlib.import_module('atmos_models')
-            return getattr(module, 'LISA')
+            cls = getattr(module, 'LISA', None)
+            if cls is not None:
+                return ('legacy', cls)
         except Exception:
-            return None
+            pass
+
+        # MartinHahner/LISA@76cdb86 python implementation: from lisa import LISA
+        try:
+            module = importlib.import_module('lisa')
+            cls = getattr(module, 'LISA', None)
+            if cls is not None:
+                return ('python', cls)
+        except Exception:
+            pass
+
+        # pip package variant
+        try:
+            module = importlib.import_module('pylisa')
+            cls = getattr(module, 'Lisa', None)
+            if cls is not None:
+                return ('pylisa', cls)
+        except Exception:
+            pass
+
+        return None
 
     def _extinction(self):
         k, a = 0.01, 0.65
@@ -103,10 +139,16 @@ class RainSimulation:
         return pts
 
     def _simulate_lisa(self, points, labels=None):
-        if labels is None:
-            labels = np.zeros((points.shape[0], 1), dtype=np.int32)
-        rain_points, _ = self._lisa.augment_mc(points, labels, self.rain_rate)
-        out = np.asarray(rain_points[:, :4], dtype=np.float32)
+        if self._lisa_impl == 'legacy':
+            if labels is None:
+                labels = np.zeros((points.shape[0], 1), dtype=np.int32)
+            rain_points, _ = self._lisa.augment_mc(points, labels, self.rain_rate)
+            out = np.asarray(rain_points[:, :4], dtype=np.float32)
+        else:
+            rain_points = self._lisa.augment(points, self.rain_rate)
+            rain_points = np.asarray(rain_points, dtype=np.float32)
+            out = rain_points[:, :4]
+
         out[:, 3] = np.clip(out[:, 3], 0, 1)
         return out
 

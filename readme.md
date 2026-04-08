@@ -118,8 +118,13 @@ cp /home/ubuntu/SWW/code/LiDAR_snow_sim/lib/LiDAR_fog_sim/integral_lookup_tables
   - `--rain_backend auto`：优先 LISA，不可用时回退 heuristic
 - 雪支持后端：
   - `--snow_backend heuristic`：当前仓库启发式
-  - `--snow_backend lidar_snow_sim`：强制使用 LiDAR_snow_sim（需可导入 `simulation.py`）
+  - `--snow_backend lidar_snow_sim`：强制使用 LiDAR_snow_sim（需可导入 `tools/snowfall/simulation.py`）
   - `--snow_backend auto`：优先 LiDAR_snow_sim，不可用时回退 heuristic
+- 注意：`LiDAR_snow_sim` 的 `augment` 接口要求输入点云为 **N×5**（`x,y,z,intensity,channel`），
+  而标准 KITTI `.bin` 只有 N×4，因此若无 ring/channel 列将无法直接调用该后端。
+- 使用 `--snow_backend lidar_snow_sim` 时还需提供：
+  - `--particle_file_prefix`（必需）
+  - 可选 `--beam_divergence --only_camera_fov --noise_floor --root_path`
 
 示例：
 ```bash
@@ -133,5 +138,3 @@ python generate_all_weather.py \
   --snow_backend auto \
   --lidar_snow_sim_path /path/to/LiDAR_snow_sim/tools/snowfall
 ```
-## 关于fog生成的解读
-https://chatgpt.com/codex/tasks/task_e_69d4a68ee90c832da2ced5777a756fe3
