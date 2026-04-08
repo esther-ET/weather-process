@@ -107,3 +107,35 @@ mkdir -p /home/ubuntu/SWW/code/weather-process/integral_lookup_tables/original
 cp /home/ubuntu/SWW/code/LiDAR_snow_sim/lib/LiDAR_fog_sim/integral_lookup_tables/original/*.pickle \
   /home/ubuntu/SWW/code/weather-process/integral_lookup_tables/original/
 ```
+
+# 深度复用外部物理仿真后端（LISA / LiDAR_snow_sim）
+- 雨支持后端：
+  - `--rain_backend heuristic`：当前仓库启发式
+  - `--rain_backend lisa`：强制使用 LISA（需可导入 `atmos_models.py`）
+  - `--rain_backend auto`：优先 LISA，不可用时回退 heuristic
+- 雪支持后端：
+  - `--snow_backend heuristic`：当前仓库启发式
+  - `--snow_backend lidar_snow_sim`：强制使用 LiDAR_snow_sim（需可导入 `tools/snowfall/simulation.py`）
+  - `--snow_backend auto`：优先 LiDAR_snow_sim，不可用时回退 heuristic
+- 注意：`LiDAR_snow_sim` 的 `augment` 接口原生要求 **N×5**（`x,y,z,intensity,channel`）。
+  本仓库已内置 Nx4 适配：
+  - `--channel_mode infer`（默认）：按点的仰角 + FOV 估计 pseudo ring/channel
+  - `--channel_mode zero`：第5维全0
+  - `--channel_mode require`：强制必须输入Nx5
+- 使用 `--snow_backend lidar_snow_sim` 时还需提供：
+  - `--particle_file_prefix`（必需）
+  - 可选 `--beam_divergence --only_camera_fov --noise_floor --root_path`
+  - 适配参数：`--num_lasers --fov_down_deg --fov_up_deg`
+
+示例：
+```bash
+python generate_all_weather.py \
+  --input_dir /path/to/velodyne \
+  --output_dir /path/to/output \
+  --weather rain snow fog \
+  --severities moderate \
+  --rain_backend auto \
+  --lisa_path /path/to/LISA \
+  --snow_backend auto \
+  --lidar_snow_sim_path /path/to/LiDAR_snow_sim/tools/snowfall
+```
