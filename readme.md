@@ -86,6 +86,9 @@ python domain_analysis.py \
         fog:/mnt/nvme0n1p2/data/datasets/kitti_weather_random/fog_random/velodyne \
     --output_dir /data/analysis/domain_shift \
     --max_frames 500
+
+# 4. /home/ubuntu/SWW/code/weather-process/analyze_split_weather_distribution.py
+训练集和测试集的分布分析。
 ```
 
 compute_statistics(clean_pts, weather_pts) 的作用：计算 clean 与 weather 点云之间的统计差异，返回一个字典，主要包括：
@@ -130,3 +133,5 @@ python generate_all_weather.py \
   --snow_backend auto \
   --lidar_snow_sim_path /path/to/LiDAR_snow_sim/tools/snowfall
 ```
+## 关于fog生成的解读
+https://chatgpt.com/codex/tasks/task_e_69d4a68ee90c832da2ced5777a756fe3
