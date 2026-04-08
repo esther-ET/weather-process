@@ -148,6 +148,7 @@ python generate_all_weather.py \
 推荐直接这样指定：
 ```bash
 --lisa_path ~/SWW/code/LiDAR_snow_sim/lib/LISA \
---lidar_snow_sim_path ~/SWW/code/LiDAR_snow_sim/tools/snowfall
+--lidar_snow_sim_path ~/SWW/code/LiDAR_snow_sim
 ```
+（`--lidar_snow_sim_path` 既支持仓库根目录，也支持直接给 `tools/snowfall` 目录）
 现在导入失败时 warning / error 会打印已搜索路径与导入异常，便于定位依赖或路径问题。

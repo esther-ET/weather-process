@@ -66,26 +66,55 @@ class SnowSimulation:
         return 'heuristic'
 
     def _import_lidar_snow_sim(self):
-        search_paths = []
+        raw_inputs = []
         tried = []
         errors = []
         if self.lidar_snow_sim_path:
-            search_paths.append(self.lidar_snow_sim_path)
-            search_paths.append(str(Path(self.lidar_snow_sim_path).expanduser() / 'tools' / 'snowfall'))
+            raw_inputs.append(self.lidar_snow_sim_path)
         env_path = os.getenv('LIDAR_SNOW_SIM_PATH')
         if env_path:
-            search_paths.append(env_path)
-            search_paths.append(str(Path(env_path).expanduser() / 'tools' / 'snowfall'))
+            raw_inputs.append(env_path)
         repo_root = Path(__file__).resolve().parent
-        search_paths.extend([
-            str(repo_root.parent / 'LiDAR_snow_sim' / 'tools' / 'snowfall'),
-            str(Path.home() / 'SWW' / 'code' / 'LiDAR_snow_sim' / 'tools' / 'snowfall'),
+        raw_inputs.extend([
+            str(repo_root.parent / 'LiDAR_snow_sim'),
+            str(Path.home() / 'SWW' / 'code' / 'LiDAR_snow_sim'),
         ])
 
+        search_paths = []
+        for raw in raw_inputs:
+            if not raw:
+                continue
+            p = Path(raw).expanduser()
+            if p.name == 'snowfall' and p.parent.name == 'tools':
+                repo = p.parent.parent
+                snowfall_dir = p
+            elif p.name == 'tools':
+                repo = p.parent
+                snowfall_dir = p / 'snowfall'
+            elif (p / 'tools' / 'snowfall').exists():
+                repo = p
+                snowfall_dir = p / 'tools' / 'snowfall'
+            else:
+                repo = p
+                snowfall_dir = p
+            search_paths.extend([
+                str(snowfall_dir),
+                str(repo),
+                str(repo / 'lib'),
+            ])
+
+        # unique preserve order
+        seen = set()
+        ordered_paths = []
         for p in search_paths:
+            if p not in seen:
+                seen.add(p)
+                ordered_paths.append(p)
+
+        for p in ordered_paths:
             if p and p not in sys.path:
-                sys.path.insert(0, str(Path(p).expanduser()))
-            tried.append(str(Path(p).expanduser()))
+                sys.path.insert(0, p)
+            tried.append(p)
 
         try:
             module = importlib.import_module('simulation')
