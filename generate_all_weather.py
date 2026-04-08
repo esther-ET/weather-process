@@ -114,7 +114,9 @@ def process_single_frame(input_path, output_path, weather_type,
                          rain_backend='auto', lisa_path=None,
                          snow_backend='auto', lidar_snow_sim_path=None,
                          particle_file_prefix=None, beam_divergence=0.35,
-                         only_camera_fov=False, noise_floor=0.7, root_path=None):
+                         only_camera_fov=False, noise_floor=0.7, root_path=None,
+                         channel_mode='infer', num_lasers=64,
+                         fov_down_deg=-24.8, fov_up_deg=2.0):
     """
     处理单帧点云
 
@@ -146,7 +148,11 @@ def process_single_frame(input_path, output_path, weather_type,
                              beam_divergence=beam_divergence,
                              only_camera_fov=only_camera_fov,
                              noise_floor=noise_floor,
-                             root_path=root_path)
+                             root_path=root_path,
+                             channel_mode=channel_mode,
+                             num_lasers=num_lasers,
+                             fov_down_deg=fov_down_deg,
+                             fov_up_deg=fov_up_deg)
         result = sim.simulate(points)
         actual_params = {'snowfall_rate': round(sr, 2)}
 
@@ -179,7 +185,9 @@ def process_selected_frames(input_dir, output_dir, weather_type,
                             rain_backend='auto', lisa_path=None,
                             snow_backend='auto', lidar_snow_sim_path=None,
                             particle_file_prefix=None, beam_divergence=0.35,
-                            only_camera_fov=False, noise_floor=0.7, root_path=None):
+                            only_camera_fov=False, noise_floor=0.7, root_path=None,
+                            channel_mode='infer', num_lasers=64,
+                            fov_down_deg=-24.8, fov_up_deg=2.0):
     """
     处理选定的帧列表
 
@@ -218,7 +226,9 @@ def process_selected_frames(input_dir, output_dir, weather_type,
                 rain_backend=rain_backend, lisa_path=lisa_path,
                 snow_backend=snow_backend, lidar_snow_sim_path=lidar_snow_sim_path,
                 particle_file_prefix=particle_file_prefix, beam_divergence=beam_divergence,
-                only_camera_fov=only_camera_fov, noise_floor=noise_floor, root_path=root_path
+                only_camera_fov=only_camera_fov, noise_floor=noise_floor, root_path=root_path,
+                channel_mode=channel_mode, num_lasers=num_lasers,
+                fov_down_deg=fov_down_deg, fov_up_deg=fov_up_deg
             )
             param_log[fname] = actual
     else:
@@ -236,7 +246,9 @@ def process_selected_frames(input_dir, output_dir, weather_type,
                     rain_backend, lisa_path,
                     snow_backend, lidar_snow_sim_path,
                     particle_file_prefix, beam_divergence,
-                    only_camera_fov, noise_floor, root_path
+                    only_camera_fov, noise_floor, root_path,
+                    channel_mode, num_lasers,
+                    fov_down_deg, fov_up_deg
                 )
                 futures[future] = fname
 
@@ -261,7 +273,9 @@ def process_mixed_weather(input_dir, output_dir, frame_list,
                           rain_backend='auto', lisa_path=None,
                           snow_backend='auto', lidar_snow_sim_path=None,
                           particle_file_prefix=None, beam_divergence=0.35,
-                          only_camera_fov=False, noise_floor=0.7, root_path=None):
+                          only_camera_fov=False, noise_floor=0.7, root_path=None,
+                          channel_mode='infer', num_lasers=64,
+                          fov_down_deg=-24.8, fov_up_deg=2.0):
     """
     混合天气模式: 每帧随机分配一种天气类型
 
@@ -302,7 +316,9 @@ def process_mixed_weather(input_dir, output_dir, frame_list,
             rain_backend=rain_backend, lisa_path=lisa_path,
             snow_backend=snow_backend, lidar_snow_sim_path=lidar_snow_sim_path,
             particle_file_prefix=particle_file_prefix, beam_divergence=beam_divergence,
-            only_camera_fov=only_camera_fov, noise_floor=noise_floor, root_path=root_path
+            only_camera_fov=only_camera_fov, noise_floor=noise_floor, root_path=root_path,
+            channel_mode=channel_mode, num_lasers=num_lasers,
+            fov_down_deg=fov_down_deg, fov_up_deg=fov_up_deg
         )
         actual['weather_type'] = wtype
         param_log[fname] = actual
@@ -496,6 +512,15 @@ python generate_all_weather.py \\
                         help="LiDAR_snow_sim noise_floor")
     parser.add_argument("--root_path", type=str, default=None,
                         help="LiDAR_snow_sim root_path (如STF root)")
+    parser.add_argument("--channel_mode", type=str, default='infer',
+                        choices=['infer', 'zero', 'require'],
+                        help="Nx4输入时channel处理：infer(按仰角估计)/zero/require")
+    parser.add_argument("--num_lasers", type=int, default=64,
+                        help="channel_mode=infer 时使用的线束数")
+    parser.add_argument("--fov_down_deg", type=float, default=-24.8,
+                        help="channel_mode=infer 时垂直FOV下界")
+    parser.add_argument("--fov_up_deg", type=float, default=2.0,
+                        help="channel_mode=infer 时垂直FOV上界")
 
     # ===== 混合天气选项 =====
     parser.add_argument("--weather_weights", nargs='+', type=float, default=None,
@@ -576,7 +601,11 @@ python generate_all_weather.py \\
             beam_divergence=args.beam_divergence,
             only_camera_fov=args.only_camera_fov,
             noise_floor=args.noise_floor,
-            root_path=args.root_path
+            root_path=args.root_path,
+            channel_mode=args.channel_mode,
+            num_lasers=args.num_lasers,
+            fov_down_deg=args.fov_down_deg,
+            fov_up_deg=args.fov_up_deg
         )
         save_param_log(out_dir, param_log, 'mixed')
 
@@ -609,7 +638,11 @@ python generate_all_weather.py \\
                     beam_divergence=args.beam_divergence,
                     only_camera_fov=args.only_camera_fov,
                     noise_floor=args.noise_floor,
-                    root_path=args.root_path
+                    root_path=args.root_path,
+                    channel_mode=args.channel_mode,
+                    num_lasers=args.num_lasers,
+                    fov_down_deg=args.fov_down_deg,
+                    fov_up_deg=args.fov_up_deg
                 )
                 save_param_log(out_dir, param_log, f'{w}_random')
 
@@ -638,7 +671,11 @@ python generate_all_weather.py \\
                         beam_divergence=args.beam_divergence,
                         only_camera_fov=args.only_camera_fov,
                         noise_floor=args.noise_floor,
-                        root_path=args.root_path
+                        root_path=args.root_path,
+                        channel_mode=args.channel_mode,
+                        num_lasers=args.num_lasers,
+                        fov_down_deg=args.fov_down_deg,
+                        fov_up_deg=args.fov_up_deg
                     )
                     save_param_log(out_dir, param_log, f'{w}_{s}')
 

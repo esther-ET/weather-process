@@ -18,7 +18,9 @@ class SnowSimulation:
     def __init__(self, snowfall_rate=2.5, terminal_velocity=1.0, snow_density=0.1,
                  backend='auto', lidar_snow_sim_path=None,
                  particle_file_prefix=None, beam_divergence=0.35,
-                 only_camera_fov=False, noise_floor=0.7, root_path=None):
+                 only_camera_fov=False, noise_floor=0.7, root_path=None,
+                 channel_mode='infer', num_lasers=64,
+                 fov_down_deg=-24.8, fov_up_deg=2.0):
         """snowfall_rate: mm/h 水当量, 建议范围 [0.5, 10]"""
         self.snowfall_rate = snowfall_rate
         self.terminal_velocity = terminal_velocity
@@ -30,6 +32,10 @@ class SnowSimulation:
         self.only_camera_fov = only_camera_fov
         self.noise_floor = noise_floor
         self.root_path = root_path
+        self.channel_mode = channel_mode
+        self.num_lasers = int(num_lasers)
+        self.fov_down_deg = float(fov_down_deg)
+        self.fov_up_deg = float(fov_up_deg)
         self.lidar_range = 120.0
         self.d_snow = 2.0 + 0.5 * np.log(1 + self.snowfall_rate)
         self.snow_conc = self._concentration()
@@ -155,11 +161,7 @@ class SnowSimulation:
         if fn is None:
             raise RuntimeError("LiDAR_snow_sim tools/snowfall/simulation.py missing augment(...) entrypoint.")
 
-        if points.ndim != 2 or points.shape[1] < 5:
-            raise ValueError(
-                "LiDAR_snow_sim augment expects Nx5 input (x,y,z,intensity,channel). "
-                f"Got shape={points.shape}. This is not a simple Nx4 API."
-            )
+        pc5 = self._ensure_channel(points)
         if not self.particle_file_prefix:
             raise ValueError(
                 "LiDAR_snow_sim backend requires particle_file_prefix, e.g. "
@@ -167,7 +169,7 @@ class SnowSimulation:
             )
 
         stats, aug_pc = fn(
-            pc=points[:, :5],
+            pc=pc5,
             particle_file_prefix=self.particle_file_prefix,
             beam_divergence=self.beam_divergence,
             shuffle=True,
@@ -184,6 +186,33 @@ class SnowSimulation:
         else:
             out[:, 3] = np.clip(out[:, 3], 0, 255 if np.max(out[:, 3]) > 1 else 1)
         return out
+
+    def _infer_channels_from_xyz(self, points):
+        xy_norm = np.sqrt(np.maximum(points[:, 0] ** 2 + points[:, 1] ** 2, 1e-12))
+        elev = np.degrees(np.arctan2(points[:, 2], xy_norm))
+        span = max(self.fov_up_deg - self.fov_down_deg, 1e-6)
+        frac = (elev - self.fov_down_deg) / span
+        ring = np.floor(frac * self.num_lasers).astype(np.int32)
+        ring = np.clip(ring, 0, max(self.num_lasers - 1, 0))
+        return ring.astype(np.float32)
+
+    def _ensure_channel(self, points):
+        if points.ndim != 2 or points.shape[1] < 4:
+            raise ValueError(f"Expected Nx4/Nx5 point cloud, got shape={points.shape}")
+        if points.shape[1] >= 5:
+            return np.asarray(points[:, :5], dtype=np.float32)
+
+        if self.channel_mode == 'require':
+            raise ValueError(
+                "LiDAR_snow_sim backend requires channel dimension (Nx5), "
+                "but received Nx4 and channel_mode=require."
+            )
+        if self.channel_mode == 'zero':
+            channel = np.zeros((points.shape[0],), dtype=np.float32)
+        else:
+            channel = self._infer_channels_from_xyz(points)
+
+        return np.concatenate([points[:, :4].astype(np.float32), channel[:, None]], axis=1)
 
     def simulate(self, points):
         if self._resolved_backend == 'lidar_snow_sim':
@@ -224,7 +253,9 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
                        random_params=False, sample_mode='log', seed=None,
                        backend='auto', lidar_snow_sim_path=None,
                        particle_file_prefix=None, beam_divergence=0.35,
-                       only_camera_fov=False, noise_floor=0.7, root_path=None):
+                       only_camera_fov=False, noise_floor=0.7, root_path=None,
+                       channel_mode='infer', num_lasers=64,
+                       fov_down_deg=-24.8, fov_up_deg=2.0):
     if seed is not None:
         np.random.seed(seed)
     os.makedirs(output_dir, exist_ok=True)
@@ -248,7 +279,11 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
             beam_divergence=beam_divergence,
             only_camera_fov=only_camera_fov,
             noise_floor=noise_floor,
-            root_path=root_path
+            root_path=root_path,
+            channel_mode=channel_mode,
+            num_lasers=num_lasers,
+            fov_down_deg=fov_down_deg,
+            fov_up_deg=fov_up_deg
         )
         points = load_kitti_points(os.path.join(input_dir, fname))
         result = sim.simulate(points)
@@ -282,6 +317,15 @@ if __name__ == "__main__":
                         help="LiDAR_snow_sim noise_floor")
     parser.add_argument("--root_path", type=str, default=None,
                         help="LiDAR_snow_sim root_path (如STF root)")
+    parser.add_argument("--channel_mode", type=str, default='infer',
+                        choices=['infer', 'zero', 'require'],
+                        help="Nx4输入时如何处理channel：infer(按仰角估计)/zero(全0)/require(强制必须Nx5)")
+    parser.add_argument("--num_lasers", type=int, default=64,
+                        help="channel_mode=infer 时使用的线束数量")
+    parser.add_argument("--fov_down_deg", type=float, default=-24.8,
+                        help="channel_mode=infer 时垂直FOV下界")
+    parser.add_argument("--fov_up_deg", type=float, default=2.0,
+                        help="channel_mode=infer 时垂直FOV上界")
     parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args()
     process_kitti_snow(args.input_dir, args.output_dir,
@@ -295,4 +339,8 @@ if __name__ == "__main__":
                        only_camera_fov=args.only_camera_fov,
                        noise_floor=args.noise_floor,
                        root_path=args.root_path,
+                       channel_mode=args.channel_mode,
+                       num_lasers=args.num_lasers,
+                       fov_down_deg=args.fov_down_deg,
+                       fov_up_deg=args.fov_up_deg,
                        seed=args.seed)
