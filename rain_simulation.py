@@ -31,7 +31,7 @@ class RainSimulation:
         if self.backend == 'heuristic':
             return 'heuristic'
 
-        lisa_handle = self._import_lisa()
+        lisa_handle, debug_msg = self._import_lisa()
         if lisa_handle is not None:
             impl, lisa_cls = lisa_handle
             self._lisa_impl = impl
@@ -49,17 +49,20 @@ class RainSimulation:
         if self.backend == 'lisa':
             raise ImportError(
                 "backend='lisa' but LISA is not importable. "
-                "Set --lisa_path or export LISA_PATH to the LISA repository root."
+                "Set --lisa_path or export LISA_PATH to the LISA repository root. "
+                f"{debug_msg}"
             )
 
         warnings.warn(
-            "LISA backend not found, falling back to heuristic rain simulation.",
+            f"LISA backend not found, falling back to heuristic rain simulation. {debug_msg}",
             RuntimeWarning
         )
         return 'heuristic'
 
     def _import_lisa(self):
         search_paths = []
+        tried = []
+        errors = []
         if self.lisa_path:
             search_paths.append(self.lisa_path)
             search_paths.append(str(Path(self.lisa_path).expanduser() / 'python'))
@@ -67,39 +70,51 @@ class RainSimulation:
         if env_lisa_path:
             search_paths.append(env_lisa_path)
             search_paths.append(str(Path(env_lisa_path).expanduser() / 'python'))
+        # common local layouts:
+        #   ~/SWW/code/LiDAR_snow_sim/lib/LISA
+        #   ~/SWW/code/LISA
+        repo_root = Path(__file__).resolve().parent
+        search_paths.extend([
+            str(repo_root.parent / 'LiDAR_snow_sim' / 'lib' / 'LISA'),
+            str(repo_root.parent / 'LISA'),
+            str(Path.home() / 'SWW' / 'code' / 'LiDAR_snow_sim' / 'lib' / 'LISA'),
+            str(Path.home() / 'SWW' / 'code' / 'LISA'),
+        ])
 
         for p in search_paths:
             if p and p not in sys.path:
                 sys.path.insert(0, str(Path(p).expanduser()))
+            tried.append(str(Path(p).expanduser()))
 
         # legacy python version: from atmos_models import LISA
         try:
             module = importlib.import_module('atmos_models')
             cls = getattr(module, 'LISA', None)
             if cls is not None:
-                return ('legacy', cls)
-        except Exception:
-            pass
+                return ('legacy', cls), f"loaded atmos_models from {module.__file__}"
+        except Exception as e:
+            errors.append(f"atmos_models: {e}")
 
         # MartinHahner/LISA@76cdb86 python implementation: from lisa import LISA
         try:
             module = importlib.import_module('lisa')
             cls = getattr(module, 'LISA', None)
             if cls is not None:
-                return ('python', cls)
-        except Exception:
-            pass
+                return ('python', cls), f"loaded lisa from {module.__file__}"
+        except Exception as e:
+            errors.append(f"lisa: {e}")
 
         # pip package variant
         try:
             module = importlib.import_module('pylisa')
             cls = getattr(module, 'Lisa', None)
             if cls is not None:
-                return ('pylisa', cls)
-        except Exception:
-            pass
+                return ('pylisa', cls), f"loaded pylisa from {module.__file__}"
+        except Exception as e:
+            errors.append(f"pylisa: {e}")
 
-        return None
+        debug_msg = f"searched_paths={tried}; import_errors={errors}"
+        return None, debug_msg
 
     def _extinction(self):
         k, a = 0.01, 0.65

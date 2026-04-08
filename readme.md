@@ -142,3 +142,12 @@ python generate_all_weather.py \
   --snow_backend auto \
   --lidar_snow_sim_path /path/to/LiDAR_snow_sim/tools/snowfall
 ```
+
+若你的目录结构是：
+`~/SWW/code/weather-process` 与 `~/SWW/code/LiDAR_snow_sim` 同级，
+推荐直接这样指定：
+```bash
+--lisa_path ~/SWW/code/LiDAR_snow_sim/lib/LISA \
+--lidar_snow_sim_path ~/SWW/code/LiDAR_snow_sim/tools/snowfall
+```
+现在导入失败时 warning / error 会打印已搜索路径与导入异常，便于定位依赖或路径问题。

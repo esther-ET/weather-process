@@ -46,7 +46,7 @@ class SnowSimulation:
         if self.backend == 'heuristic':
             return 'heuristic'
 
-        module = self._import_lidar_snow_sim()
+        module, debug_msg = self._import_lidar_snow_sim()
         if module is not None:
             self._snow_module = module
             return 'lidar_snow_sim'
@@ -55,17 +55,20 @@ class SnowSimulation:
             raise ImportError(
                 "backend='lidar_snow_sim' but simulation module is not importable. "
                 "Set --lidar_snow_sim_path or export LIDAR_SNOW_SIM_PATH "
-                "to the directory containing simulation.py."
+                "to the directory containing simulation.py. "
+                f"{debug_msg}"
             )
 
         warnings.warn(
-            "LiDAR_snow_sim backend not found, falling back to heuristic snow simulation.",
+            f"LiDAR_snow_sim backend not found, falling back to heuristic snow simulation. {debug_msg}",
             RuntimeWarning
         )
         return 'heuristic'
 
     def _import_lidar_snow_sim(self):
         search_paths = []
+        tried = []
+        errors = []
         if self.lidar_snow_sim_path:
             search_paths.append(self.lidar_snow_sim_path)
             search_paths.append(str(Path(self.lidar_snow_sim_path).expanduser() / 'tools' / 'snowfall'))
@@ -73,15 +76,24 @@ class SnowSimulation:
         if env_path:
             search_paths.append(env_path)
             search_paths.append(str(Path(env_path).expanduser() / 'tools' / 'snowfall'))
+        repo_root = Path(__file__).resolve().parent
+        search_paths.extend([
+            str(repo_root.parent / 'LiDAR_snow_sim' / 'tools' / 'snowfall'),
+            str(Path.home() / 'SWW' / 'code' / 'LiDAR_snow_sim' / 'tools' / 'snowfall'),
+        ])
 
         for p in search_paths:
             if p and p not in sys.path:
                 sys.path.insert(0, str(Path(p).expanduser()))
+            tried.append(str(Path(p).expanduser()))
 
         try:
-            return importlib.import_module('simulation')
-        except Exception:
-            return None
+            module = importlib.import_module('simulation')
+            return module, f"loaded simulation from {module.__file__}"
+        except Exception as e:
+            errors.append(str(e))
+            debug_msg = f"searched_paths={tried}; import_errors={errors}"
+            return None, debug_msg
 
     def _concentration(self):
         d_m = self.d_snow * 1e-3
