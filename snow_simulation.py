@@ -10,6 +10,7 @@ import importlib
 import sys
 from pathlib import Path
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from utils import (load_kitti_points, save_kitti_points,
                    get_lidar_distance, sample_snowfall_rate)
 
@@ -444,6 +445,46 @@ def _save_param_log(output_dir, param_log, weather_type):
     print(f"  Param log saved to {txt_path}")
 
 
+def _process_snow_batch(worker_payload):
+    """Process a batch of frames in one worker process, reusing simulator instance."""
+    (batch_files, input_dir, output_dir,
+     random_params, sample_mode, snowfall_rate, seed,
+     backend, lidar_snow_sim_path, lisa_path,
+     particle_file_prefix, beam_divergence, only_camera_fov,
+     noise_floor, root_path, lidar_parallel_backend,
+     channel_mode, num_lasers, fov_down_deg, fov_up_deg) = worker_payload
+
+    if seed is not None:
+        np.random.seed(seed)
+
+    sim = SnowSimulation(
+        snowfall_rate=(snowfall_rate if snowfall_rate is not None else 2.5),
+        backend=backend,
+        lidar_snow_sim_path=lidar_snow_sim_path,
+        lisa_path=lisa_path,
+        particle_file_prefix=particle_file_prefix,
+        beam_divergence=beam_divergence,
+        only_camera_fov=only_camera_fov,
+        noise_floor=noise_floor,
+        root_path=root_path,
+        lidar_parallel_backend=lidar_parallel_backend,
+        channel_mode=channel_mode,
+        num_lasers=num_lasers,
+        fov_down_deg=fov_down_deg,
+        fov_up_deg=fov_up_deg
+    )
+
+    batch_log = {}
+    for fname in batch_files:
+        sr = sample_snowfall_rate(mode=sample_mode) if random_params else snowfall_rate
+        sim.set_snowfall_rate(sr)
+        points = load_kitti_points(os.path.join(input_dir, fname))
+        result = sim.simulate(points)
+        save_kitti_points(result, os.path.join(output_dir, fname))
+        batch_log[fname] = {'snowfall_rate': round(sr, 2)}
+    return batch_log
+
+
 def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
                        random_params=False, sample_mode='log', seed=None,
                        backend='auto', lidar_snow_sim_path=None,
@@ -451,6 +492,7 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
                        particle_file_prefix=None, beam_divergence=0.35,
                        only_camera_fov=False, noise_floor=0.7, root_path=None,
                        lidar_parallel_backend='thread',
+                       num_workers=1,
                        channel_mode='infer', num_lasers=64,
                        fov_down_deg=-24.8, fov_up_deg=2.0):
     if seed is not None:
@@ -465,11 +507,9 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
         snowfall_rate = snowfall_rate or 2.5
         print(f"[Snow] {len(bin_files)} files, snowfall_rate={snowfall_rate} mm/h")
 
-    for fname in tqdm(bin_files, desc="Snow"):
-        sr = sample_snowfall_rate(mode=sample_mode) if random_params else snowfall_rate
-        param_log[fname] = {'snowfall_rate': round(sr, 2)}
+    if num_workers <= 1:
         sim = SnowSimulation(
-            snowfall_rate=sr,
+            snowfall_rate=(snowfall_rate if snowfall_rate is not None else 2.5),
             backend=backend,
             lidar_snow_sim_path=lidar_snow_sim_path,
             lisa_path=lisa_path,
@@ -484,9 +524,34 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
             fov_down_deg=fov_down_deg,
             fov_up_deg=fov_up_deg
         )
-        points = load_kitti_points(os.path.join(input_dir, fname))
-        result = sim.simulate(points)
-        save_kitti_points(result, os.path.join(output_dir, fname))
+        for fname in tqdm(bin_files, desc="Snow"):
+            sr = sample_snowfall_rate(mode=sample_mode) if random_params else snowfall_rate
+            param_log[fname] = {'snowfall_rate': round(sr, 2)}
+            sim.set_snowfall_rate(sr)
+            points = load_kitti_points(os.path.join(input_dir, fname))
+            result = sim.simulate(points)
+            save_kitti_points(result, os.path.join(output_dir, fname))
+    else:
+        num_workers = min(int(num_workers), len(bin_files))
+        chunk_size = (len(bin_files) + num_workers - 1) // num_workers
+        batches = [bin_files[i:i + chunk_size] for i in range(0, len(bin_files), chunk_size)]
+
+        futures = {}
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            for worker_id, batch_files in enumerate(batches):
+                worker_seed = None if seed is None else int(seed) + worker_id
+                payload = (
+                    batch_files, input_dir, output_dir,
+                    random_params, sample_mode, snowfall_rate, worker_seed,
+                    backend, lidar_snow_sim_path, lisa_path,
+                    particle_file_prefix, beam_divergence, only_camera_fov,
+                    noise_floor, root_path, lidar_parallel_backend,
+                    channel_mode, num_lasers, fov_down_deg, fov_up_deg
+                )
+                futures[executor.submit(_process_snow_batch, payload)] = batch_files
+
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Snow workers"):
+                param_log.update(future.result())
 
     _save_param_log(output_dir, param_log, 'snow')
     return param_log
@@ -521,6 +586,8 @@ if __name__ == "__main__":
     parser.add_argument("--lidar_parallel_backend", type=str, default='thread',
                         choices=['thread', 'process'],
                         help="LiDAR_snow_sim 通道并行后端: thread 或 process")
+    parser.add_argument("--num_workers", type=int, default=1,
+                        help="并行处理帧数的worker数(>1启用多进程)")
     parser.add_argument("--channel_mode", type=str, default='infer',
                         choices=['infer', 'zero', 'require'],
                         help="Nx4输入时如何处理channel：infer(按仰角估计)/zero(全0)/require(强制必须Nx5)")
@@ -545,6 +612,7 @@ if __name__ == "__main__":
                        noise_floor=args.noise_floor,
                        root_path=args.root_path,
                        lidar_parallel_backend=args.lidar_parallel_backend,
+                       num_workers=args.num_workers,
                        channel_mode=args.channel_mode,
                        num_lasers=args.num_lasers,
                        fov_down_deg=args.fov_down_deg,
