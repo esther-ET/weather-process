@@ -61,7 +61,21 @@ python generate_all_weather.py \
  --lidar_snow_sim_path ~/SWW/code/LiDAR_snow_sim/tools/snowfall \
  --random_params --sample_mode log --seed 42 \
  --particle_file_prefix gunn_4.816236598076465_1.1574074074074074e-06\
- --lidar_parallel_backend process
+--lidar_parallel_backend process
+
+# 雪模拟太慢时（如 7891 帧耗时过长），建议优先这样跑：
+# 1) 只开雪 weather，避免和雨雾串行
+# 2) 帧级并行 --num_workers N（N≈物理核数的一半到1倍）
+# 3) LiDAR_snow_sim 内部并行使用 process（CPU 充足时）
+python snow_simulation.py \
+  --input_dir /mnt/nvme0n1p2/data/datasets/KITTI2/object/training/velodyne \
+  --output_dir /mnt/nvme0n1p2/data/datasets/kitti_weather_random/snow_fast/velodyne \
+  --backend lidar_snow_sim \
+  --lidar_snow_sim_path ~/SWW/code/LiDAR_snow_sim \
+  --particle_file_prefix gunn_4.816236598076465_1.1574074074074074e-06 \
+  --num_workers 8 \
+  --lidar_parallel_backend process \
+  --channel_mode infer
 
 # 2. 可视化对比 在仅仅生成Saved JSON: /home/ubuntu/SWW/analysis/visualization_moderate/statistics.json 时候说明路径有问题了
 python vis_and_diff.py \
@@ -159,4 +173,3 @@ python generate_all_weather.py \
 ```
 （`--lidar_snow_sim_path` 既支持仓库根目录，也支持直接给 `tools/snowfall` 目录）
 现在导入失败时 warning / error 会打印已搜索路径与导入异常，便于定位依赖或路径问题。
-
