@@ -115,8 +115,10 @@ def process_single_frame(input_path, output_path, weather_type,
                          snow_backend='auto', lidar_snow_sim_path=None,
                          particle_file_prefix=None, beam_divergence=0.35,
                          only_camera_fov=False, noise_floor=0.7, root_path=None,
+                         lidar_parallel_backend='thread',
                          channel_mode='infer', num_lasers=64,
-                         fov_down_deg=-24.8, fov_up_deg=2.0):
+                         fov_down_deg=-24.8, fov_up_deg=2.0,
+                         sim_cache=None):
     """
     处理单帧点云
 
@@ -141,18 +143,26 @@ def process_single_frame(input_path, output_path, weather_type,
 
     elif weather_type == 'snow':
         sr = sample_snowfall_rate(sample_mode) if random_params else params.get('snowfall_rate', 2.5)
-        sim = SnowSimulation(snowfall_rate=sr,
-                             backend=snow_backend,
-                             lidar_snow_sim_path=lidar_snow_sim_path,
-                             particle_file_prefix=particle_file_prefix,
-                             beam_divergence=beam_divergence,
-                             only_camera_fov=only_camera_fov,
-                             noise_floor=noise_floor,
-                             root_path=root_path,
-                             channel_mode=channel_mode,
-                             num_lasers=num_lasers,
-                             fov_down_deg=fov_down_deg,
-                             fov_up_deg=fov_up_deg)
+        sim = sim_cache.get('snow') if sim_cache is not None else None
+        if sim is None:
+            sim = SnowSimulation(snowfall_rate=sr,
+                                 backend=snow_backend,
+                                 lidar_snow_sim_path=lidar_snow_sim_path,
+                                 lisa_path=lisa_path,
+                                 particle_file_prefix=particle_file_prefix,
+                                 beam_divergence=beam_divergence,
+                                 only_camera_fov=only_camera_fov,
+                                 noise_floor=noise_floor,
+                                 root_path=root_path,
+                                   lidar_parallel_backend=lidar_parallel_backend,
+                                 channel_mode=channel_mode,
+                                 num_lasers=num_lasers,
+                                 fov_down_deg=fov_down_deg,
+                                 fov_up_deg=fov_up_deg)
+            if sim_cache is not None:
+                sim_cache['snow'] = sim
+        else:
+            sim.set_snowfall_rate(sr)
         result = sim.simulate(points)
         actual_params = {'snowfall_rate': round(sr, 2)}
 
@@ -186,6 +196,7 @@ def process_selected_frames(input_dir, output_dir, weather_type,
                             snow_backend='auto', lidar_snow_sim_path=None,
                             particle_file_prefix=None, beam_divergence=0.35,
                             only_camera_fov=False, noise_floor=0.7, root_path=None,
+                            lidar_parallel_backend='thread',
                             channel_mode='infer', num_lasers=64,
                             fov_down_deg=-24.8, fov_up_deg=2.0):
     """
@@ -217,6 +228,7 @@ def process_selected_frames(input_dir, output_dir, weather_type,
 
     if num_workers <= 1:
         # 单进程
+        sim_cache = {}
         for fname in tqdm(frame_list, desc=weather_type):
             input_path = os.path.join(input_dir, fname)
             output_path = os.path.join(output_dir, fname)
@@ -227,8 +239,10 @@ def process_selected_frames(input_dir, output_dir, weather_type,
                 snow_backend=snow_backend, lidar_snow_sim_path=lidar_snow_sim_path,
                 particle_file_prefix=particle_file_prefix, beam_divergence=beam_divergence,
                 only_camera_fov=only_camera_fov, noise_floor=noise_floor, root_path=root_path,
+                lidar_parallel_backend=lidar_parallel_backend,
                 channel_mode=channel_mode, num_lasers=num_lasers,
-                fov_down_deg=fov_down_deg, fov_up_deg=fov_up_deg
+                fov_down_deg=fov_down_deg, fov_up_deg=fov_up_deg,
+                sim_cache=sim_cache
             )
             param_log[fname] = actual
     else:
@@ -247,6 +261,7 @@ def process_selected_frames(input_dir, output_dir, weather_type,
                     snow_backend, lidar_snow_sim_path,
                     particle_file_prefix, beam_divergence,
                     only_camera_fov, noise_floor, root_path,
+                    lidar_parallel_backend,
                     channel_mode, num_lasers,
                     fov_down_deg, fov_up_deg
                 )
@@ -274,6 +289,7 @@ def process_mixed_weather(input_dir, output_dir, frame_list,
                           snow_backend='auto', lidar_snow_sim_path=None,
                           particle_file_prefix=None, beam_divergence=0.35,
                           only_camera_fov=False, noise_floor=0.7, root_path=None,
+                          lidar_parallel_backend='thread',
                           channel_mode='infer', num_lasers=64,
                           fov_down_deg=-24.8, fov_up_deg=2.0):
     """
@@ -305,6 +321,7 @@ def process_mixed_weather(input_dir, output_dir, frame_list,
         count = np.sum(assignments == wt)
         print(f"    {wt}: {count} frames ({count/len(frame_list)*100:.1f}%)")
 
+    sim_cache = {}
     for fname, wtype in tqdm(zip(frame_list, assignments),
                               total=len(frame_list), desc="Mixed"):
         input_path = os.path.join(input_dir, fname)
@@ -317,8 +334,10 @@ def process_mixed_weather(input_dir, output_dir, frame_list,
             snow_backend=snow_backend, lidar_snow_sim_path=lidar_snow_sim_path,
             particle_file_prefix=particle_file_prefix, beam_divergence=beam_divergence,
             only_camera_fov=only_camera_fov, noise_floor=noise_floor, root_path=root_path,
+            lidar_parallel_backend=lidar_parallel_backend,
             channel_mode=channel_mode, num_lasers=num_lasers,
-            fov_down_deg=fov_down_deg, fov_up_deg=fov_up_deg
+            fov_down_deg=fov_down_deg, fov_up_deg=fov_up_deg,
+            sim_cache=sim_cache
         )
         actual['weather_type'] = wtype
         param_log[fname] = actual
@@ -496,10 +515,10 @@ python generate_all_weather.py \\
                         choices=['auto', 'heuristic', 'lisa'],
                         help="雨模拟后端：auto(优先LISA)/heuristic/lisa")
     parser.add_argument("--lisa_path", type=str, default=None,
-                        help="LISA仓库路径(应包含 atmos_models.py)")
+                        help="LISA仓库路径(支持 thirdparty/LISA 与 python_old 布局)")
     parser.add_argument("--snow_backend", type=str, default='auto',
-                        choices=['auto', 'heuristic', 'lidar_snow_sim'],
-                        help="雪模拟后端：auto(优先LiDAR_snow_sim)/heuristic/lidar_snow_sim")
+                        choices=['auto', 'heuristic', 'lidar_snow_sim', 'lisa'],
+                        help="雪模拟后端：auto(优先LiDAR_snow_sim, 次选LISA)/heuristic/lidar_snow_sim/lisa")
     parser.add_argument("--lidar_snow_sim_path", type=str, default=None,
                         help="LiDAR_snow_sim 中 simulation.py 所在目录")
     parser.add_argument("--particle_file_prefix", type=str, default=None,
@@ -512,6 +531,9 @@ python generate_all_weather.py \\
                         help="LiDAR_snow_sim noise_floor")
     parser.add_argument("--root_path", type=str, default=None,
                         help="LiDAR_snow_sim root_path (如STF root)")
+    parser.add_argument("--lidar_parallel_backend", type=str, default='thread',
+                        choices=['thread', 'process'],
+                        help="LiDAR_snow_sim 通道并行后端: thread 或 process")
     parser.add_argument("--channel_mode", type=str, default='infer',
                         choices=['infer', 'zero', 'require'],
                         help="Nx4输入时channel处理：infer(按仰角估计)/zero/require")
@@ -537,6 +559,10 @@ python generate_all_weather.py \\
                         help="仅显示将处理的帧列表，不实际生成")
 
     args = parser.parse_args()
+
+    if args.lidar_parallel_backend == 'process' and args.num_workers > 1:
+        print("WARNING: --lidar_parallel_backend process 与 --num_workers>1 会形成嵌套多进程，容易卡住；已自动将 --num_workers 设为 1")
+        args.num_workers = 1
 
     # ===== 设置随机种子 =====
     if args.seed is not None:
@@ -602,6 +628,7 @@ python generate_all_weather.py \\
             only_camera_fov=args.only_camera_fov,
             noise_floor=args.noise_floor,
             root_path=args.root_path,
+            lidar_parallel_backend=args.lidar_parallel_backend,
             channel_mode=args.channel_mode,
             num_lasers=args.num_lasers,
             fov_down_deg=args.fov_down_deg,
@@ -639,6 +666,7 @@ python generate_all_weather.py \\
                     only_camera_fov=args.only_camera_fov,
                     noise_floor=args.noise_floor,
                     root_path=args.root_path,
+                    lidar_parallel_backend=args.lidar_parallel_backend,
                     channel_mode=args.channel_mode,
                     num_lasers=args.num_lasers,
                     fov_down_deg=args.fov_down_deg,
@@ -672,6 +700,7 @@ python generate_all_weather.py \\
                         only_camera_fov=args.only_camera_fov,
                         noise_floor=args.noise_floor,
                         root_path=args.root_path,
+                        lidar_parallel_backend=args.lidar_parallel_backend,
                         channel_mode=args.channel_mode,
                         num_lasers=args.num_lasers,
                         fov_down_deg=args.fov_down_deg,

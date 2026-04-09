@@ -15,10 +15,15 @@ from utils import (load_kitti_points, save_kitti_points,
 
 
 class SnowSimulation:
+    _LISA_IMPORT_CACHE = {}
+    _LIDAR_SNOW_IMPORT_CACHE = {}
+
     def __init__(self, snowfall_rate=2.5, terminal_velocity=1.0, snow_density=0.1,
                  backend='auto', lidar_snow_sim_path=None,
+                 lisa_path=None,
                  particle_file_prefix=None, beam_divergence=0.35,
                  only_camera_fov=False, noise_floor=0.7, root_path=None,
+                 lidar_parallel_backend='thread',
                  channel_mode='infer', num_lasers=64,
                  fov_down_deg=-24.8, fov_up_deg=2.0):
         """snowfall_rate: mm/h 水当量, 建议范围 [0.5, 10]"""
@@ -27,11 +32,13 @@ class SnowSimulation:
         self.snow_density = snow_density
         self.backend = backend
         self.lidar_snow_sim_path = lidar_snow_sim_path
+        self.lisa_path = lisa_path
         self.particle_file_prefix = particle_file_prefix
         self.beam_divergence = beam_divergence
         self.only_camera_fov = only_camera_fov
         self.noise_floor = noise_floor
         self.root_path = root_path
+        self.lidar_parallel_backend = str(lidar_parallel_backend)
         self.channel_mode = channel_mode
         self.num_lasers = int(num_lasers)
         self.fov_down_deg = float(fov_down_deg)
@@ -40,16 +47,28 @@ class SnowSimulation:
         self.d_snow = 2.0 + 0.5 * np.log(1 + self.snowfall_rate)
         self.snow_conc = self._concentration()
         self._snow_module = None
+        self._lisa = None
+        self._lisa_impl = None
         self._resolved_backend = self._resolve_backend()
+
+    def set_snowfall_rate(self, snowfall_rate):
+        """更新降雪率并刷新与启发式模型相关的派生参数。"""
+        self.snowfall_rate = float(snowfall_rate)
+        self.d_snow = 2.0 + 0.5 * np.log(1 + self.snowfall_rate)
+        self.snow_conc = self._concentration()
+        return self
 
     def _resolve_backend(self):
         if self.backend == 'heuristic':
             return 'heuristic'
 
-        module, debug_msg = self._import_lidar_snow_sim()
-        if module is not None:
-            self._snow_module = module
-            return 'lidar_snow_sim'
+        if self.backend in ('auto', 'lidar_snow_sim'):
+            module, debug_msg = self._import_lidar_snow_sim()
+            if module is not None:
+                self._snow_module = module
+                return 'lidar_snow_sim'
+        else:
+            debug_msg = 'lidar_snow_sim skipped by backend setting'
 
         if self.backend == 'lidar_snow_sim':
             raise ImportError(
@@ -59,16 +78,110 @@ class SnowSimulation:
                 f"{debug_msg}"
             )
 
+        lisa_handle, lisa_debug = self._import_lisa()
+        if lisa_handle is not None:
+            impl, lisa_cls = lisa_handle
+            self._lisa_impl = impl
+            if impl == 'legacy':
+                self._lisa = lisa_cls(atm_model='snow')
+            elif impl == 'python':
+                self._lisa = lisa_cls(mode='snow')
+            elif impl == 'pylisa':
+                self._lisa = lisa_cls(atm_model='snow')
+            return 'lisa'
+
+        if self.backend == 'lisa':
+            raise ImportError(
+                "backend='lisa' but LISA is not importable. "
+                "Set --lisa_path or export LISA_PATH to the LISA repository root. "
+                f"{lisa_debug}"
+            )
+
         warnings.warn(
-            f"LiDAR_snow_sim backend not found, falling back to heuristic snow simulation. {debug_msg}",
+            "Physical snow backends not found, falling back to heuristic snow simulation. "
+            f"lidar_snow_sim={debug_msg}; lisa={lisa_debug}",
             RuntimeWarning
         )
         return 'heuristic'
+
+    def _import_lisa(self):
+        search_paths = []
+        tried = []
+        errors = []
+
+        if self.lisa_path:
+            base = Path(self.lisa_path).expanduser()
+            search_paths.append(str(base))
+            search_paths.append(str(base / 'python_old'))
+
+        env_lisa_path = os.getenv('LISA_PATH')
+        if env_lisa_path:
+            base = Path(env_lisa_path).expanduser()
+            search_paths.append(str(base))
+            search_paths.append(str(base / 'python_old'))
+
+        repo_root = Path(__file__).resolve().parent
+        search_paths.extend([
+            str(repo_root / 'thirdparty' / 'LISA'),
+            str(repo_root / 'thirdparty' / 'LISA' / 'python_old'),
+            str(repo_root.parent / 'LiDAR_snow_sim' / 'lib' / 'LISA'),
+            str(repo_root.parent / 'LISA'),
+            str(Path.home() / 'SWW' / 'code' / 'weather-process' / 'thirdparty' / 'LISA'),
+            str(Path.home() / 'SWW' / 'code' / 'weather-process' / 'thirdparty' / 'LISA' / 'python_old'),
+            str(Path.home() / 'SWW' / 'code' / 'LiDAR_snow_sim' / 'lib' / 'LISA'),
+            str(Path.home() / 'SWW' / 'code' / 'LISA'),
+        ])
+
+        for p in search_paths:
+            if p and p not in sys.path:
+                sys.path.insert(0, p)
+            tried.append(p)
+
+        cache_key = tuple(tried)
+        if cache_key in self._LISA_IMPORT_CACHE:
+            return self._LISA_IMPORT_CACHE[cache_key]
+
+        try:
+            module = importlib.import_module('atmos_models')
+            cls = getattr(module, 'LISA', None)
+            if cls is not None:
+                result = (('legacy', cls), f"loaded atmos_models from {module.__file__}")
+                self._LISA_IMPORT_CACHE[cache_key] = result
+                return result
+        except Exception as e:
+            errors.append(f"atmos_models: {e}")
+
+        try:
+            module = importlib.import_module('lisa')
+            cls = getattr(module, 'LISA', None)
+            if cls is not None:
+                result = (('python', cls), f"loaded lisa from {module.__file__}")
+                self._LISA_IMPORT_CACHE[cache_key] = result
+                return result
+        except Exception as e:
+            errors.append(f"lisa: {e}")
+
+        try:
+            module = importlib.import_module('pylisa.lisa')
+            cls = getattr(module, 'Lisa', None)
+            if cls is not None:
+                result = (('pylisa', cls), f"loaded pylisa.lisa from {module.__file__}")
+                self._LISA_IMPORT_CACHE[cache_key] = result
+                return result
+        except Exception as e:
+            errors.append(f"pylisa.lisa: {e}")
+
+        debug_msg = f"searched_paths={tried}; import_errors={errors}"
+        result = (None, debug_msg)
+        self._LISA_IMPORT_CACHE[cache_key] = result
+        return result
 
     def _import_lidar_snow_sim(self):
         raw_inputs = []
         tried = []
         errors = []
+        added_paths = []
+        import_ok = False
         if self.lidar_snow_sim_path:
             raw_inputs.append(self.lidar_snow_sim_path)
         env_path = os.getenv('LIDAR_SNOW_SIM_PATH')
@@ -100,6 +213,7 @@ class SnowSimulation:
             search_paths.extend([
                 str(snowfall_dir),
                 str(repo),
+                str(repo / 'tools' / 'wet_ground'),
                 str(repo / 'lib'),
             ])
 
@@ -114,15 +228,47 @@ class SnowSimulation:
         for p in ordered_paths:
             if p and p not in sys.path:
                 sys.path.insert(0, p)
+                added_paths.append(p)
             tried.append(p)
+
+        cache_key = tuple(tried)
+        if cache_key in self._LIDAR_SNOW_IMPORT_CACHE:
+            return self._LIDAR_SNOW_IMPORT_CACHE[cache_key]
+
+        # Avoid local module-name collisions (e.g., weather-process/utils.py) while
+        # importing LiDAR_snow_sim modules that use top-level imports like
+        # `from utils import ...`.
+        shadow_names = ('utils', 'planes', 'phy_equations')
+        shadow_backup = {}
+        for name in shadow_names:
+            if name in sys.modules:
+                shadow_backup[name] = sys.modules.pop(name)
 
         try:
             module = importlib.import_module('simulation')
-            return module, f"loaded simulation from {module.__file__}"
+            import_ok = True
+            result = (module, f"loaded simulation from {module.__file__}")
+            self._LIDAR_SNOW_IMPORT_CACHE[cache_key] = result
+            return result
         except Exception as e:
             errors.append(str(e))
             debug_msg = f"searched_paths={tried}; import_errors={errors}"
-            return None, debug_msg
+            result = (None, debug_msg)
+            self._LIDAR_SNOW_IMPORT_CACHE[cache_key] = result
+            return result
+        finally:
+            # Restore original modules to keep this project import behavior stable.
+            for name in shadow_names:
+                if name in shadow_backup:
+                    sys.modules[name] = shadow_backup[name]
+
+            # If import failed, clean up paths we injected to avoid polluting sys.path.
+            if not import_ok:
+                for p in added_paths:
+                    try:
+                        sys.path.remove(p)
+                    except ValueError:
+                        pass
 
     def _concentration(self):
         d_m = self.d_snow * 1e-3
@@ -217,7 +363,8 @@ class SnowSimulation:
             show_progressbar=False,
             only_camera_fov=self.only_camera_fov,
             noise_floor=self.noise_floor,
-            root_path=self.root_path
+            root_path=self.root_path,
+            parallel_backend=self.lidar_parallel_backend
         )
         _ = stats
         out = np.asarray(aug_pc[:, :4], dtype=np.float32)
@@ -267,6 +414,13 @@ class SnowSimulation:
                     RuntimeWarning
                 )
 
+        if self._resolved_backend == 'lisa':
+            rain_points = self._lisa.augment(points, self.snowfall_rate)
+            rain_points = np.asarray(rain_points, dtype=np.float32)
+            out = rain_points[:, :4]
+            out[:, 3] = np.clip(out[:, 3], 0, 1)
+            return out
+
         pts = points.copy()
         pts = self._attenuate(pts)
         pts = self._accumulation(pts)
@@ -293,8 +447,10 @@ def _save_param_log(output_dir, param_log, weather_type):
 def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
                        random_params=False, sample_mode='log', seed=None,
                        backend='auto', lidar_snow_sim_path=None,
+                       lisa_path=None,
                        particle_file_prefix=None, beam_divergence=0.35,
                        only_camera_fov=False, noise_floor=0.7, root_path=None,
+                       lidar_parallel_backend='thread',
                        channel_mode='infer', num_lasers=64,
                        fov_down_deg=-24.8, fov_up_deg=2.0):
     if seed is not None:
@@ -316,11 +472,13 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
             snowfall_rate=sr,
             backend=backend,
             lidar_snow_sim_path=lidar_snow_sim_path,
+            lisa_path=lisa_path,
             particle_file_prefix=particle_file_prefix,
             beam_divergence=beam_divergence,
             only_camera_fov=only_camera_fov,
             noise_floor=noise_floor,
             root_path=root_path,
+            lidar_parallel_backend=lidar_parallel_backend,
             channel_mode=channel_mode,
             num_lasers=num_lasers,
             fov_down_deg=fov_down_deg,
@@ -344,8 +502,10 @@ if __name__ == "__main__":
     parser.add_argument("--sample_mode", type=str, default='log',
                         choices=['uniform', 'log', 'category'])
     parser.add_argument("--backend", type=str, default='auto',
-                        choices=['auto', 'heuristic', 'lidar_snow_sim'],
-                        help="snow backend: auto(优先LiDAR_snow_sim), heuristic(当前启发式), lidar_snow_sim(强制)")
+                        choices=['auto', 'heuristic', 'lidar_snow_sim', 'lisa'],
+                        help="snow backend: auto(优先LiDAR_snow_sim, 次选LISA), heuristic, lidar_snow_sim, lisa")
+    parser.add_argument("--lisa_path", type=str, default=None,
+                        help="LISA仓库路径(支持 thirdparty/LISA 与 python_old 布局)")
     parser.add_argument("--lidar_snow_sim_path", type=str, default=None,
                         help="LiDAR_snow_sim 中 simulation.py 所在目录")
     parser.add_argument("--particle_file_prefix", type=str, default=None,
@@ -358,6 +518,9 @@ if __name__ == "__main__":
                         help="LiDAR_snow_sim noise_floor")
     parser.add_argument("--root_path", type=str, default=None,
                         help="LiDAR_snow_sim root_path (如STF root)")
+    parser.add_argument("--lidar_parallel_backend", type=str, default='thread',
+                        choices=['thread', 'process'],
+                        help="LiDAR_snow_sim 通道并行后端: thread 或 process")
     parser.add_argument("--channel_mode", type=str, default='infer',
                         choices=['infer', 'zero', 'require'],
                         help="Nx4输入时如何处理channel：infer(按仰角估计)/zero(全0)/require(强制必须Nx5)")
@@ -375,11 +538,13 @@ if __name__ == "__main__":
                        sample_mode=args.sample_mode,
                        backend=args.backend,
                        lidar_snow_sim_path=args.lidar_snow_sim_path,
+                       lisa_path=args.lisa_path,
                        particle_file_prefix=args.particle_file_prefix,
                        beam_divergence=args.beam_divergence,
                        only_camera_fov=args.only_camera_fov,
                        noise_floor=args.noise_floor,
                        root_path=args.root_path,
+                       lidar_parallel_backend=args.lidar_parallel_backend,
                        channel_mode=args.channel_mode,
                        num_lasers=args.num_lasers,
                        fov_down_deg=args.fov_down_deg,

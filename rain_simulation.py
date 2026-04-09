@@ -40,10 +40,15 @@ class RainSimulation:
             elif impl == 'python':
                 self._lisa = lisa_cls(mode='rain')
             elif impl == 'pylisa':
-                lidar = importlib.import_module('pylisa').Lidar()
-                water = importlib.import_module('pylisa').Water()
-                rain = importlib.import_module('pylisa').MarshallPalmerRain()
-                self._lisa = lisa_cls(lidar, water, rain)
+                pylisa_module = importlib.import_module('pylisa')
+                if all(hasattr(pylisa_module, n) for n in ['Lidar', 'Water', 'MarshallPalmerRain']):
+                    lidar = pylisa_module.Lidar()
+                    water = pylisa_module.Water()
+                    rain = pylisa_module.MarshallPalmerRain()
+                    self._lisa = lisa_cls(lidar, water, rain)
+                else:
+                    # velatkilic/LISA layout: class Lisa(atm_model='rain'|'snow')
+                    self._lisa = lisa_cls(atm_model='rain')
             return 'lisa'
 
         if self.backend == 'lisa':
@@ -63,6 +68,27 @@ class RainSimulation:
         search_paths = []
         tried = []
         errors = []
+
+        # PyMieScatt in some LISA versions imports scipy.integrate.trapz,
+        # which was removed in newer SciPy. Provide a safe compatibility shim.
+        try:
+            import scipy.integrate as _scipy_integrate
+            if not hasattr(_scipy_integrate, 'trapz'):
+                _scipy_integrate.trapz = np.trapz
+        except Exception as e:
+            errors.append(f"scipy_compat: {e}")
+
+        # LISA python implementation may use mp.pool.ThreadPool.
+        # In newer Python versions, multiprocessing may not expose `pool`
+        # as an attribute unless submodule is explicitly imported.
+        try:
+            import multiprocessing as _mp
+            import multiprocessing.pool as _mp_pool
+            if not hasattr(_mp, 'pool'):
+                _mp.pool = _mp_pool
+        except Exception as e:
+            errors.append(f"multiprocessing_compat: {e}")
+
         if self.lisa_path:
             search_paths.append(self.lisa_path)
             search_paths.append(str(Path(self.lisa_path).expanduser() / 'python'))
@@ -75,8 +101,12 @@ class RainSimulation:
         #   ~/SWW/code/LISA
         repo_root = Path(__file__).resolve().parent
         search_paths.extend([
+            str(repo_root / 'thirdparty' / 'LISA'),
+            str(repo_root / 'thirdparty' / 'LISA' / 'python_old'),
             str(repo_root.parent / 'LiDAR_snow_sim' / 'lib' / 'LISA'),
             str(repo_root.parent / 'LISA'),
+            str(Path.home() / 'SWW' / 'code' / 'weather-process' / 'thirdparty' / 'LISA'),
+            str(Path.home() / 'SWW' / 'code' / 'weather-process' / 'thirdparty' / 'LISA' / 'python_old'),
             str(Path.home() / 'SWW' / 'code' / 'LiDAR_snow_sim' / 'lib' / 'LISA'),
             str(Path.home() / 'SWW' / 'code' / 'LISA'),
         ])
@@ -155,10 +185,17 @@ class RainSimulation:
 
     def _simulate_lisa(self, points, labels=None):
         if self._lisa_impl == 'legacy':
-            if labels is None:
-                labels = np.zeros((points.shape[0], 1), dtype=np.int32)
-            rain_points, _ = self._lisa.augment_mc(points, labels, self.rain_rate)
-            out = np.asarray(rain_points[:, :4], dtype=np.float32)
+            # Support both legacy APIs:
+            #   augment_mc(pc, Rr)
+            #   augment_mc(pc, labels, Rr) -> (pc_new, labels_new)
+            try:
+                rain_points = self._lisa.augment_mc(points, self.rain_rate)
+                out = np.asarray(rain_points[:, :4], dtype=np.float32)
+            except TypeError:
+                if labels is None:
+                    labels = np.zeros((points.shape[0], 1), dtype=np.int32)
+                rain_points, _ = self._lisa.augment_mc(points, labels, self.rain_rate)
+                out = np.asarray(rain_points[:, :4], dtype=np.float32)
         else:
             rain_points = self._lisa.augment(points, self.rain_rate)
             rain_points = np.asarray(rain_points, dtype=np.float32)
