@@ -192,6 +192,7 @@ def process_selected_frames(input_dir, output_dir, weather_type,
                             frame_list, params=None,
                             random_params=False, sample_mode='log',
                             num_workers=1,
+                            skip_existing=False,
                             rain_backend='auto', lisa_path=None,
                             snow_backend='auto', lidar_snow_sim_path=None,
                             particle_file_prefix=None, beam_divergence=0.35,
@@ -211,6 +212,7 @@ def process_selected_frames(input_dir, output_dir, weather_type,
         random_params: 是否随机
         sample_mode: 采样模式
         num_workers: 并行worker数 (1=单进程)
+        skip_existing: 跳过输出目录中已存在的文件
 
     Returns:
         dict: 每帧的参数记录
@@ -218,6 +220,16 @@ def process_selected_frames(input_dir, output_dir, weather_type,
     os.makedirs(output_dir, exist_ok=True)
     params = params or {}
     param_log = OrderedDict()
+
+    if skip_existing:
+        pending = [f for f in frame_list if not os.path.isfile(os.path.join(output_dir, f))]
+        skipped = len(frame_list) - len(pending)
+        if skipped:
+            print(f"  [{weather_type}] Skipping {skipped} already-processed files, {len(pending)} remaining")
+        frame_list = pending
+
+    if not frame_list:
+        return param_log
 
     if random_params:
         desc = f"{weather_type} (random, {sample_mode})"
@@ -551,6 +563,8 @@ python generate_all_weather.py \\
     # ===== 性能 =====
     parser.add_argument("--num_workers", type=int, default=1,
                         help="并行worker数 (1=单进程)")
+    parser.add_argument("--skip_existing", action='store_true',
+                        help="跳过输出目录中已存在的文件，支持断点续处理")
 
     # ===== 附加功能 =====
     parser.add_argument("--preview", action='store_true',
@@ -657,6 +671,7 @@ python generate_all_weather.py \\
                     args.input_dir, out_dir, w, frame_list,
                     random_params=True, sample_mode=args.sample_mode,
                     num_workers=args.num_workers,
+                    skip_existing=args.skip_existing,
                     rain_backend=args.rain_backend,
                     lisa_path=args.lisa_path,
                     snow_backend=args.snow_backend,
@@ -691,6 +706,7 @@ python generate_all_weather.py \\
                         args.input_dir, out_dir, w, frame_list,
                         params=params, random_params=False,
                         num_workers=args.num_workers,
+                        skip_existing=args.skip_existing,
                         rain_backend=args.rain_backend,
                         lisa_path=args.lisa_path,
                         snow_backend=args.snow_backend,

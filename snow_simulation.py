@@ -319,21 +319,23 @@ class SnowSimulation:
             return np.empty((0, 4), dtype=np.float32)
         nc = int(self.snowfall_rate * 2)
         npc = int(self.snowfall_rate * 5)
-        parts = []
-        for _ in range(nc):
-            cr = np.random.uniform(1, 10)
-            caz = np.random.uniform(-np.pi, np.pi)
-            cel = np.random.uniform(np.radians(-15), np.radians(2))
-            cx = cr * np.cos(cel) * np.cos(caz)
-            cy = cr * np.cos(cel) * np.sin(caz)
-            cz = cr * np.sin(cel)
-            parts.append(np.stack([
-                cx + np.random.normal(0, 0.15, npc),
-                cy + np.random.normal(0, 0.15, npc),
-                cz + np.random.normal(0, 0.10, npc),
-                np.random.uniform(0.05, 0.3, npc)
-            ], axis=1))
-        return np.vstack(parts).astype(np.float32) if parts else np.empty((0, 4), dtype=np.float32)
+        total_points = nc * npc
+        # Generate all cluster centers at once (vectorized)
+        cr = np.random.uniform(1, 10, nc)
+        caz = np.random.uniform(-np.pi, np.pi, nc)
+        cel = np.random.uniform(np.radians(-15), np.radians(2), nc)
+        cx = cr * np.cos(cel) * np.cos(caz)
+        cy = cr * np.cos(cel) * np.sin(caz)
+        cz = cr * np.sin(cel)
+        # Repeat each center npc times, then add per-point scatter
+        cx_rep = np.repeat(cx, npc)
+        cy_rep = np.repeat(cy, npc)
+        cz_rep = np.repeat(cz, npc)
+        x = cx_rep + np.random.normal(0, 0.15, total_points)
+        y = cy_rep + np.random.normal(0, 0.15, total_points)
+        z = cz_rep + np.random.normal(0, 0.10, total_points)
+        intensity = np.random.uniform(0.05, 0.3, total_points)
+        return np.stack([x, y, z, intensity], axis=1).astype(np.float32)
 
     def _accumulation(self, pts):
         mask = np.abs(pts[:, 2] + 1.73) < 0.3
@@ -452,7 +454,8 @@ def _process_snow_batch(worker_payload):
      backend, lidar_snow_sim_path, lisa_path,
      particle_file_prefix, beam_divergence, only_camera_fov,
      noise_floor, root_path, lidar_parallel_backend,
-     channel_mode, num_lasers, fov_down_deg, fov_up_deg) = worker_payload
+     channel_mode, num_lasers, fov_down_deg, fov_up_deg,
+     skip_existing) = worker_payload
 
     if seed is not None:
         np.random.seed(seed)
@@ -476,11 +479,14 @@ def _process_snow_batch(worker_payload):
 
     batch_log = {}
     for fname in batch_files:
+        out_path = os.path.join(output_dir, fname)
+        if skip_existing and os.path.isfile(out_path):
+            continue
         sr = sample_snowfall_rate(mode=sample_mode) if random_params else snowfall_rate
         sim.set_snowfall_rate(sr)
         points = load_kitti_points(os.path.join(input_dir, fname))
         result = sim.simulate(points)
-        save_kitti_points(result, os.path.join(output_dir, fname))
+        save_kitti_points(result, out_path)
         batch_log[fname] = {'snowfall_rate': round(sr, 2)}
     return batch_log
 
@@ -493,6 +499,7 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
                        only_camera_fov=False, noise_floor=0.7, root_path=None,
                        lidar_parallel_backend='thread',
                        num_workers=1,
+                       skip_existing=False,
                        channel_mode='infer', num_lasers=64,
                        fov_down_deg=-24.8, fov_up_deg=2.0):
     if seed is not None:
@@ -506,6 +513,16 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
     else:
         snowfall_rate = snowfall_rate or 2.5
         print(f"[Snow] {len(bin_files)} files, snowfall_rate={snowfall_rate} mm/h")
+
+    if skip_existing:
+        pending = [f for f in bin_files if not os.path.isfile(os.path.join(output_dir, f))]
+        skipped = len(bin_files) - len(pending)
+        if skipped:
+            print(f"[Snow] Skipping {skipped} already-processed files, {len(pending)} remaining")
+        bin_files = pending
+
+    if not bin_files:
+        return param_log
 
     if num_workers <= 1:
         sim = SnowSimulation(
@@ -546,7 +563,8 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
                     backend, lidar_snow_sim_path, lisa_path,
                     particle_file_prefix, beam_divergence, only_camera_fov,
                     noise_floor, root_path, lidar_parallel_backend,
-                    channel_mode, num_lasers, fov_down_deg, fov_up_deg
+                    channel_mode, num_lasers, fov_down_deg, fov_up_deg,
+                    skip_existing
                 )
                 futures[executor.submit(_process_snow_batch, payload)] = batch_files
 
@@ -588,6 +606,8 @@ if __name__ == "__main__":
                         help="LiDAR_snow_sim 通道并行后端: thread 或 process")
     parser.add_argument("--num_workers", type=int, default=1,
                         help="并行处理帧数的worker数(>1启用多进程)")
+    parser.add_argument("--skip_existing", action='store_true',
+                        help="跳过输出目录中已存在的文件，支持断点续处理")
     parser.add_argument("--channel_mode", type=str, default='infer',
                         choices=['infer', 'zero', 'require'],
                         help="Nx4输入时如何处理channel：infer(按仰角估计)/zero(全0)/require(强制必须Nx5)")
@@ -613,6 +633,7 @@ if __name__ == "__main__":
                        root_path=args.root_path,
                        lidar_parallel_backend=args.lidar_parallel_backend,
                        num_workers=args.num_workers,
+                       skip_existing=args.skip_existing,
                        channel_mode=args.channel_mode,
                        num_lasers=args.num_lasers,
                        fov_down_deg=args.fov_down_deg,
