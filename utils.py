@@ -6,9 +6,15 @@ import numpy as np
 import os
 
 
-def load_kitti_points(bin_path):
-    """加载KITTI bin文件 -> (N, 4)"""
-    return np.fromfile(bin_path, dtype=np.float32).reshape(-1, 4)
+def load_kitti_points(bin_path, point_dim=4):
+    """加载bin文件 -> (N, point_dim), 默认兼容KITTI 4维。"""
+    points = np.fromfile(bin_path, dtype=np.float32)
+    if points.size % point_dim != 0:
+        raise ValueError(
+            f"Invalid bin size for point_dim={point_dim}: total_floats={points.size}, "
+            f"path={bin_path}"
+        )
+    return points.reshape(-1, point_dim)
 
 
 def save_kitti_points(points, save_path):

@@ -8,6 +8,7 @@ import os
 import warnings
 import importlib
 import sys
+import re
 from pathlib import Path
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -18,6 +19,7 @@ from utils import (load_kitti_points, save_kitti_points,
 class SnowSimulation:
     _LISA_IMPORT_CACHE = {}
     _LIDAR_SNOW_IMPORT_CACHE = {}
+    _PARTICLE_PROFILE_CACHE = {}
 
     def __init__(self, snowfall_rate=2.5, terminal_velocity=1.0, snow_density=0.1,
                  backend='auto', lidar_snow_sim_path=None,
@@ -25,6 +27,9 @@ class SnowSimulation:
                  particle_file_prefix=None, beam_divergence=0.35,
                  only_camera_fov=False, noise_floor=0.7, root_path=None,
                  lidar_parallel_backend='thread',
+                 particle_model='gunn',
+                 rainfall_rate_levels=None,
+                 rainfall_level_sampling='nearest',
                  channel_mode='infer', num_lasers=64,
                  fov_down_deg=-24.8, fov_up_deg=2.0):
         """snowfall_rate: mm/h 水当量, 建议范围 [0.5, 10]"""
@@ -40,6 +45,18 @@ class SnowSimulation:
         self.noise_floor = noise_floor
         self.root_path = root_path
         self.lidar_parallel_backend = str(lidar_parallel_backend)
+        self.particle_model = str(particle_model).lower()
+        if self.particle_model not in ('gunn', 'sekhon'):
+            raise ValueError(f"particle_model must be 'gunn' or 'sekhon', got {particle_model}")
+        if rainfall_rate_levels is None:
+            self.rainfall_rate_levels = [2.0, 8.0, 17.0, 34.0, 70.0]
+        else:
+            self.rainfall_rate_levels = [float(x) for x in rainfall_rate_levels]
+        self.rainfall_level_sampling = str(rainfall_level_sampling).lower()
+        if self.rainfall_level_sampling not in ('nearest', 'balanced'):
+            raise ValueError(
+                f"rainfall_level_sampling must be 'nearest' or 'balanced', got {rainfall_level_sampling}"
+            )
         self.channel_mode = channel_mode
         self.num_lasers = int(num_lasers)
         self.fov_down_deg = float(fov_down_deg)
@@ -50,6 +67,10 @@ class SnowSimulation:
         self._snow_module = None
         self._lisa = None
         self._lisa_impl = None
+        self.last_particle_file_prefix = None
+        self.last_particle_rainfall_rate = None
+        self.last_target_rainfall_rate = None
+        self.last_target_rainfall_level = None
         self._resolved_backend = self._resolve_backend()
 
     def set_snowfall_rate(self, snowfall_rate):
@@ -319,21 +340,23 @@ class SnowSimulation:
             return np.empty((0, 4), dtype=np.float32)
         nc = int(self.snowfall_rate * 2)
         npc = int(self.snowfall_rate * 5)
-        parts = []
-        for _ in range(nc):
-            cr = np.random.uniform(1, 10)
-            caz = np.random.uniform(-np.pi, np.pi)
-            cel = np.random.uniform(np.radians(-15), np.radians(2))
-            cx = cr * np.cos(cel) * np.cos(caz)
-            cy = cr * np.cos(cel) * np.sin(caz)
-            cz = cr * np.sin(cel)
-            parts.append(np.stack([
-                cx + np.random.normal(0, 0.15, npc),
-                cy + np.random.normal(0, 0.15, npc),
-                cz + np.random.normal(0, 0.10, npc),
-                np.random.uniform(0.05, 0.3, npc)
-            ], axis=1))
-        return np.vstack(parts).astype(np.float32) if parts else np.empty((0, 4), dtype=np.float32)
+        total_points = nc * npc
+        # Generate all cluster centers at once (vectorized)
+        cr = np.random.uniform(1, 10, nc)
+        caz = np.random.uniform(-np.pi, np.pi, nc)
+        cel = np.random.uniform(np.radians(-15), np.radians(2), nc)
+        cx = cr * np.cos(cel) * np.cos(caz)
+        cy = cr * np.cos(cel) * np.sin(caz)
+        cz = cr * np.sin(cel)
+        # Repeat each center npc times, then add per-point scatter
+        cx_rep = np.repeat(cx, npc)
+        cy_rep = np.repeat(cy, npc)
+        cz_rep = np.repeat(cz, npc)
+        x = cx_rep + np.random.normal(0, 0.15, total_points)
+        y = cy_rep + np.random.normal(0, 0.15, total_points)
+        z = cz_rep + np.random.normal(0, 0.10, total_points)
+        intensity = np.random.uniform(0.05, 0.3, total_points)
+        return np.stack([x, y, z, intensity], axis=1).astype(np.float32)
 
     def _accumulation(self, pts):
         mask = np.abs(pts[:, 2] + 1.73) < 0.3
@@ -350,15 +373,11 @@ class SnowSimulation:
             raise RuntimeError("LiDAR_snow_sim tools/snowfall/simulation.py missing augment(...) entrypoint.")
 
         pc5 = self._ensure_channel(points)
-        if not self.particle_file_prefix:
-            raise ValueError(
-                "LiDAR_snow_sim backend requires particle_file_prefix, e.g. "
-                "--particle_file_prefix gunn_4.816236598076465_1.1574074074074074"
-            )
+        particle_file_prefix = self._resolve_particle_file_prefix()
 
         stats, aug_pc = fn(
             pc=pc5,
-            particle_file_prefix=self.particle_file_prefix,
+            particle_file_prefix=particle_file_prefix,
             beam_divergence=self.beam_divergence,
             shuffle=True,
             show_progressbar=False,
@@ -375,6 +394,117 @@ class SnowSimulation:
         else:
             out[:, 3] = np.clip(out[:, 3], 0, 255 if np.max(out[:, 3]) > 1 else 1)
         return out
+
+    def _snowfall_to_rainfall_rate(self, snowfall_rate):
+        # Match LiDAR_snow_sim tools/snowfall/sampling.py conversion.
+        denom = 487.0 * float(self.snow_density) * 0.003 * float(self.terminal_velocity)
+        if denom <= 0:
+            raise ValueError("snow_density and terminal_velocity must be positive")
+        return float(np.sqrt((float(snowfall_rate) / denom) ** 3))
+
+    def _particle_npy_dir(self):
+        if self.root_path:
+            return Path(self.root_path).expanduser() / 'training' / 'snowflakes' / 'npy'
+        if self._snow_module is None:
+            return None
+        module_path = Path(getattr(self._snow_module, '__file__', '')).resolve()
+        return module_path.parent.parent.parent / 'npy'
+
+    def _load_particle_profiles(self):
+        npy_dir = self._particle_npy_dir()
+        if npy_dir is None:
+            return []
+
+        cache_key = str(npy_dir)
+        if cache_key in self._PARTICLE_PROFILE_CACHE:
+            return self._PARTICLE_PROFILE_CACHE[cache_key]
+
+        if not npy_dir.exists():
+            self._PARTICLE_PROFILE_CACHE[cache_key] = []
+            return []
+
+        pattern = re.compile(r'^(gunn|sekhon)_([\deE+\-.]+)_([\deE+\-.]+)_(\d+)\.npy$')
+        grouped = {}
+        for f in npy_dir.glob('*.npy'):
+            m = pattern.match(f.name)
+            if not m:
+                continue
+            model = m.group(1)
+            rainfall_rate = float(m.group(2))
+            occupancy = float(m.group(3))
+            channel = int(m.group(4))
+            key = (model, rainfall_rate, occupancy)
+            if key not in grouped:
+                grouped[key] = set()
+            grouped[key].add(channel)
+
+        profiles = []
+        for (model, rainfall_rate, occupancy), channels in grouped.items():
+            profiles.append({
+                'model': model,
+                'rainfall_rate': rainfall_rate,
+                'occupancy': occupancy,
+                'num_channels': len(channels),
+            })
+
+        profiles.sort(key=lambda x: (x['model'], x['rainfall_rate']))
+        self._PARTICLE_PROFILE_CACHE[cache_key] = profiles
+        return profiles
+
+    def _resolve_particle_file_prefix(self):
+        if self.particle_file_prefix:
+            self.last_particle_file_prefix = self.particle_file_prefix
+            try:
+                self.last_particle_rainfall_rate = float(str(self.particle_file_prefix).split('_')[1])
+            except Exception:
+                self.last_particle_rainfall_rate = None
+            self.last_target_rainfall_rate = None
+            self.last_target_rainfall_level = None
+            return self.particle_file_prefix
+
+        profiles = [p for p in self._load_particle_profiles() if p['model'] == self.particle_model]
+        if not profiles:
+            raise ValueError(
+                "LiDAR_snow_sim backend requires particle_file_prefix, or available precomputed particle files. "
+                f"No {self.particle_model} profiles found under {self._particle_npy_dir()}."
+            )
+
+        rainfall_target = self._snowfall_to_rainfall_rate(self.snowfall_rate)
+        if self.rainfall_level_sampling == 'balanced':
+            levels = sorted(float(r) for r in self.rainfall_rate_levels)
+            nominal = float(np.random.choice(levels))
+            idx = levels.index(nominal)
+            if len(levels) == 1:
+                lo, hi = nominal, nominal
+            elif idx == 0:
+                right_mid = 0.5 * (levels[idx] + levels[idx + 1])
+                lo, hi = max(0.0, nominal - (right_mid - nominal)), right_mid
+            elif idx == len(levels) - 1:
+                left_mid = 0.5 * (levels[idx - 1] + levels[idx])
+                lo, hi = left_mid, nominal + (nominal - left_mid)
+            else:
+                left_mid = 0.5 * (levels[idx - 1] + levels[idx])
+                right_mid = 0.5 * (levels[idx] + levels[idx + 1])
+                lo, hi = left_mid, right_mid
+            rainfall_target = float(np.random.uniform(lo, hi)) if hi > lo else nominal
+        else:
+            nominal = min(self.rainfall_rate_levels, key=lambda r: abs(float(r) - rainfall_target))
+
+        selected = min(profiles, key=lambda p: abs(p['rainfall_rate'] - rainfall_target))
+
+        prefix = f"{selected['model']}_{selected['rainfall_rate']}_{selected['occupancy']}"
+        self.last_particle_file_prefix = prefix
+        self.last_particle_rainfall_rate = selected['rainfall_rate']
+        self.last_target_rainfall_rate = rainfall_target
+        self.last_target_rainfall_level = float(nominal)
+
+        if selected['num_channels'] < self.num_lasers:
+            warnings.warn(
+                f"Particle prefix {prefix} has {selected['num_channels']} channels, fewer than num_lasers={self.num_lasers}.",
+                RuntimeWarning
+            )
+
+        return prefix
 
     def _infer_channels_from_xyz(self, points):
         xy_norm = np.sqrt(np.maximum(points[:, 0] ** 2 + points[:, 1] ** 2, 1e-12))
@@ -452,7 +582,10 @@ def _process_snow_batch(worker_payload):
      backend, lidar_snow_sim_path, lisa_path,
      particle_file_prefix, beam_divergence, only_camera_fov,
      noise_floor, root_path, lidar_parallel_backend,
-     channel_mode, num_lasers, fov_down_deg, fov_up_deg) = worker_payload
+    particle_model, rainfall_rate_levels,
+    rainfall_level_sampling,
+     channel_mode, num_lasers, fov_down_deg, fov_up_deg,
+     skip_existing) = worker_payload
 
     if seed is not None:
         np.random.seed(seed)
@@ -468,6 +601,9 @@ def _process_snow_batch(worker_payload):
         noise_floor=noise_floor,
         root_path=root_path,
         lidar_parallel_backend=lidar_parallel_backend,
+        particle_model=particle_model,
+        rainfall_rate_levels=rainfall_rate_levels,
+        rainfall_level_sampling=rainfall_level_sampling,
         channel_mode=channel_mode,
         num_lasers=num_lasers,
         fov_down_deg=fov_down_deg,
@@ -476,12 +612,21 @@ def _process_snow_batch(worker_payload):
 
     batch_log = {}
     for fname in batch_files:
+        out_path = os.path.join(output_dir, fname)
+        if skip_existing and os.path.isfile(out_path):
+            continue
         sr = sample_snowfall_rate(mode=sample_mode) if random_params else snowfall_rate
         sim.set_snowfall_rate(sr)
         points = load_kitti_points(os.path.join(input_dir, fname))
         result = sim.simulate(points)
-        save_kitti_points(result, os.path.join(output_dir, fname))
-        batch_log[fname] = {'snowfall_rate': round(sr, 2)}
+        save_kitti_points(result, out_path)
+        batch_log[fname] = {
+            'snowfall_rate': round(sr, 2),
+            'particle_file_prefix': sim.last_particle_file_prefix,
+            'particle_rainfall_rate': sim.last_particle_rainfall_rate,
+            'target_rainfall_rate': sim.last_target_rainfall_rate,
+            'target_rainfall_level': sim.last_target_rainfall_level,
+        }
     return batch_log
 
 
@@ -492,7 +637,11 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
                        particle_file_prefix=None, beam_divergence=0.35,
                        only_camera_fov=False, noise_floor=0.7, root_path=None,
                        lidar_parallel_backend='thread',
+                       particle_model='gunn',
+                       rainfall_rate_levels=None,
+                       rainfall_level_sampling='nearest',
                        num_workers=1,
+                       skip_existing=False,
                        channel_mode='infer', num_lasers=64,
                        fov_down_deg=-24.8, fov_up_deg=2.0):
     if seed is not None:
@@ -507,6 +656,16 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
         snowfall_rate = snowfall_rate or 2.5
         print(f"[Snow] {len(bin_files)} files, snowfall_rate={snowfall_rate} mm/h")
 
+    if skip_existing:
+        pending = [f for f in bin_files if not os.path.isfile(os.path.join(output_dir, f))]
+        skipped = len(bin_files) - len(pending)
+        if skipped:
+            print(f"[Snow] Skipping {skipped} already-processed files, {len(pending)} remaining")
+        bin_files = pending
+
+    if not bin_files:
+        return param_log
+
     if num_workers <= 1:
         sim = SnowSimulation(
             snowfall_rate=(snowfall_rate if snowfall_rate is not None else 2.5),
@@ -519,6 +678,9 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
             noise_floor=noise_floor,
             root_path=root_path,
             lidar_parallel_backend=lidar_parallel_backend,
+            particle_model=particle_model,
+            rainfall_rate_levels=rainfall_rate_levels,
+            rainfall_level_sampling=rainfall_level_sampling,
             channel_mode=channel_mode,
             num_lasers=num_lasers,
             fov_down_deg=fov_down_deg,
@@ -526,11 +688,17 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
         )
         for fname in tqdm(bin_files, desc="Snow"):
             sr = sample_snowfall_rate(mode=sample_mode) if random_params else snowfall_rate
-            param_log[fname] = {'snowfall_rate': round(sr, 2)}
             sim.set_snowfall_rate(sr)
             points = load_kitti_points(os.path.join(input_dir, fname))
             result = sim.simulate(points)
             save_kitti_points(result, os.path.join(output_dir, fname))
+            param_log[fname] = {
+                'snowfall_rate': round(sr, 2),
+                'particle_file_prefix': sim.last_particle_file_prefix,
+                'particle_rainfall_rate': sim.last_particle_rainfall_rate,
+                'target_rainfall_rate': sim.last_target_rainfall_rate,
+                'target_rainfall_level': sim.last_target_rainfall_level,
+            }
     else:
         num_workers = min(int(num_workers), len(bin_files))
         chunk_size = (len(bin_files) + num_workers - 1) // num_workers
@@ -546,7 +714,10 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
                     backend, lidar_snow_sim_path, lisa_path,
                     particle_file_prefix, beam_divergence, only_camera_fov,
                     noise_floor, root_path, lidar_parallel_backend,
-                    channel_mode, num_lasers, fov_down_deg, fov_up_deg
+                    particle_model, rainfall_rate_levels,
+                    rainfall_level_sampling,
+                    channel_mode, num_lasers, fov_down_deg, fov_up_deg,
+                    skip_existing
                 )
                 futures[executor.submit(_process_snow_batch, payload)] = batch_files
 
@@ -586,8 +757,19 @@ if __name__ == "__main__":
     parser.add_argument("--lidar_parallel_backend", type=str, default='thread',
                         choices=['thread', 'process'],
                         help="LiDAR_snow_sim 通道并行后端: thread 或 process")
+    parser.add_argument("--particle_model", type=str, default='gunn',
+                        choices=['gunn', 'sekhon'],
+                        help="LiDAR_snow_sim 自动选前缀时使用的粒径分布模型")
+    parser.add_argument("--rainfall_rate_levels", nargs='+', type=float,
+                        default=[2.0, 8.0, 17.0, 34.0, 70.0],
+                        help="自动选粒子前缀时使用的降雨率档位(mm/h)，默认 2 8 17 34 70")
+    parser.add_argument("--rainfall_level_sampling", type=str, default='nearest',
+                        choices=['nearest', 'balanced'],
+                        help="nearest: 按 snowfall_rate 最近档映射; balanced: 先等概率选档位再在档位内均匀采样")
     parser.add_argument("--num_workers", type=int, default=1,
                         help="并行处理帧数的worker数(>1启用多进程)")
+    parser.add_argument("--skip_existing", action='store_true',
+                        help="跳过输出目录中已存在的文件，支持断点续处理")
     parser.add_argument("--channel_mode", type=str, default='infer',
                         choices=['infer', 'zero', 'require'],
                         help="Nx4输入时如何处理channel：infer(按仰角估计)/zero(全0)/require(强制必须Nx5)")
@@ -612,7 +794,11 @@ if __name__ == "__main__":
                        noise_floor=args.noise_floor,
                        root_path=args.root_path,
                        lidar_parallel_backend=args.lidar_parallel_backend,
+                       particle_model=args.particle_model,
+                       rainfall_rate_levels=args.rainfall_rate_levels,
+                       rainfall_level_sampling=args.rainfall_level_sampling,
                        num_workers=args.num_workers,
+                       skip_existing=args.skip_existing,
                        channel_mode=args.channel_mode,
                        num_lasers=args.num_lasers,
                        fov_down_deg=args.fov_down_deg,

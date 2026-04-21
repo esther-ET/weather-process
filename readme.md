@@ -67,6 +67,7 @@ python generate_all_weather.py \
 # 1) 只开雪 weather，避免和雨雾串行
 # 2) 帧级并行 --num_workers N（N≈物理核数的一半到1倍）
 # 3) LiDAR_snow_sim 内部并行使用 process（CPU 充足时）
+# 4) 添加 --skip_existing 支持断点续处理（已处理的帧直接跳过）
 python snow_simulation.py \
   --input_dir /mnt/nvme0n1p2/data/datasets/KITTI2/object/training/velodyne \
   --output_dir /mnt/nvme0n1p2/data/datasets/kitti_weather_random/snow_fast/velodyne \
@@ -75,7 +76,8 @@ python snow_simulation.py \
   --particle_file_prefix gunn_4.816236598076465_1.1574074074074074e-06 \
   --num_workers 8 \
   --lidar_parallel_backend process \
-  --channel_mode infer
+  --channel_mode infer \
+  --skip_existing
 
 # 2. 可视化对比 在仅仅生成Saved JSON: /home/ubuntu/SWW/analysis/visualization_moderate/statistics.json 时候说明路径有问题了
 python vis_and_diff.py \
@@ -151,9 +153,10 @@ cp /home/ubuntu/SWW/code/LiDAR_snow_sim/lib/LiDAR_fog_sim/integral_lookup_tables
   - 适配参数：`--num_lasers --fov_down_deg --fov_up_deg`
 
 示例：
+雪生成：先每个档位平均，再在档位里面取值
 ```bash
 python generate_all_weather.py \
- --weather rain \
+ --weather snow\
  --input_dir /mnt/nvme0n1p2/data/datasets/KITTI2/object/training/velodyne \
  --output_dir /mnt/nvme0n1p2/data/datasets/kitti_weather_random \
  --rain_backend auto \
@@ -161,7 +164,9 @@ python generate_all_weather.py \
  --snow_backend auto \
  --lidar_snow_sim_path ~/SWW/code/LiDAR_snow_sim/tools/snowfall \
  --random_params --sample_mode log --seed 42 \
- --particle_file_prefix gunn_4.816236598076465_1.1574074074074074e-06
+  --particle_model gunn\
+  --rainfall_rate_levels 2 8 17 34 70 \
+  --rainfall_level_sampling balanced
 ```
 
 若你的目录结构是：

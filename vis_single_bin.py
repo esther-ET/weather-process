@@ -12,12 +12,24 @@ python vis_single_bin.py \
   --output_dir /home/ubuntu/SWW/analysis/tmp \
   --compare_bin /mnt/nvme0n1p2/data/datasets/kitti_weather_random/rain_random/velodyne/000022.bin \
   --compare_name rain
-
+python vis_single_bin.py \
+  --bin_path /mnt/nvme0n1p2/data/datasets/dense/testing/lidar_hdl64_strongest/2018-12-09_10-56-06_07900.bin \
+  --output_dir /home/ubuntu/SWW/analysis/tmp \
+  --compare_bin /mnt/nvme0n1p2/data/datasets/dense/testing/lidar_hdl64_strongest/2018-12-09_10-56-06_07900.bin \
+  --compare_name snow \
+  --output_dir /home/ubuntu/SWW/analysis/tmp_dense \
+  --dense
+python vis_single_bin.py \
+  --bin_path /mnt/nvme0n1p2/data/datasets/snowfall_simulation/gunn/lidar_hdl64_strongest_rainrate_34/2018-02-17_10-36-53_00500.bin \
+  --output_dir /home/ubuntu/SWW/analysis/tmp \
+  --compare_bin /mnt/nvme0n1p2/data/datasets/snowfall_simulation/gunn/lidar_hdl64_strongest_rainrate_34/2018-02-17_10-36-53_00500.bin \
+  --compare_name snow \
+  --output_dir /home/ubuntu/SWW/analysis/tmp_dense \
+  --dense
 """
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 import matplotlib
@@ -36,15 +48,35 @@ from vis_and_diff import (
 )
 
 
+def _normalize_intensity(intensity):
+    intensity = intensity.astype(np.float32)
+    if intensity.size == 0:
+        return intensity, 'empty'
+
+    vmin = float(np.nanmin(intensity))
+    vmax = float(np.nanmax(intensity))
+    if vmax <= 1.5 and vmin >= -0.1:
+        return np.clip(intensity, 0.0, 1.0), 'unit_0_1'
+    if vmin >= 0.0 and vmax <= 255.0:
+        return np.clip(intensity / 255.0, 0.0, 1.0), 'uint8_0_255'
+
+    lo, hi = np.quantile(intensity, [0.01, 0.99])
+    if hi <= lo:
+        return np.zeros_like(intensity), 'constant'
+    scaled = (intensity - lo) / (hi - lo)
+    return np.clip(scaled, 0.0, 1.0), 'quantile_1_99'
+
+
 def _plot_single_bev(points, save_path, title, xlim=(-40, 40), ylim=(0, 70)):
     mask = (
         (points[:, 0] > xlim[0]) & (points[:, 0] < xlim[1]) &
         (points[:, 1] > ylim[0]) & (points[:, 1] < ylim[1])
     )
     p = points[mask]
+    color, _ = _normalize_intensity(p[:, 3])
 
     fig, ax = plt.subplots(1, 1, figsize=(7, 7))
-    sc = ax.scatter(p[:, 1], p[:, 0], c=p[:, 3], cmap='viridis', s=0.12, vmin=0, vmax=1, alpha=0.8)
+    sc = ax.scatter(p[:, 1], p[:, 0], c=color, cmap='viridis', s=0.12, vmin=0, vmax=1, alpha=0.8)
     ax.set_xlim(ylim)
     ax.set_ylim(xlim)
     ax.set_xlabel('Y (m)')
@@ -64,9 +96,10 @@ def _plot_single_side(points, save_path, title, xlim=(0, 70), zlim=(-3, 3)):
         (points[:, 2] > zlim[0]) & (points[:, 2] < zlim[1])
     )
     p = points[mask]
+    color, _ = _normalize_intensity(p[:, 3])
 
     fig, ax = plt.subplots(1, 1, figsize=(11, 4))
-    sc = ax.scatter(p[:, 0], p[:, 2], c=p[:, 3], cmap='viridis', s=0.12, vmin=0, vmax=1, alpha=0.7)
+    sc = ax.scatter(p[:, 0], p[:, 2], c=color, cmap='viridis', s=0.12, vmin=0, vmax=1, alpha=0.7)
     ax.set_xlim(xlim)
     ax.set_ylim(zlim)
     ax.set_xlabel('X (m)')
@@ -81,11 +114,12 @@ def _plot_single_side(points, save_path, title, xlim=(0, 70), zlim=(-3, 3)):
 
 def _plot_single_hist(points, save_path, title):
     dist = np.sqrt(np.sum(points[:, :3] ** 2, axis=1))
+    intensity_vis, _ = _normalize_intensity(points[:, 3])
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    axes[0].hist(points[:, 3], bins=100, color='#2E86AB', alpha=0.85)
-    axes[0].set_title('Intensity Histogram')
-    axes[0].set_xlabel('Intensity')
+    axes[0].hist(intensity_vis, bins=100, color='#2E86AB', alpha=0.85)
+    axes[0].set_title('Intensity Histogram (Normalized)')
+    axes[0].set_xlabel('Normalized Intensity [0, 1]')
     axes[0].set_ylabel('Count')
     axes[0].grid(True, alpha=0.25)
 
@@ -126,7 +160,12 @@ def main():
     parser.add_argument('--xlim', nargs=2, type=float, default=[-40, 40], metavar=('XMIN', 'XMAX'))
     parser.add_argument('--ylim', nargs=2, type=float, default=[0, 70], metavar=('YMIN', 'YMAX'))
     parser.add_argument('--zlim', nargs=2, type=float, default=[-3, 3], metavar=('ZMIN', 'ZMAX'))
+    fmt_group = parser.add_mutually_exclusive_group()
+    fmt_group.add_argument('--kitti', action='store_true', help='按KITTI格式读取bin（4维，默认）')
+    fmt_group.add_argument('--dense', action='store_true', help='按DENSE格式读取bin（5维）')
     args = parser.parse_args()
+
+    point_dim = 5 if args.dense else 4
 
     bin_path = Path(args.bin_path).expanduser()
     compare_path = Path(args.compare_bin).expanduser() if args.compare_bin else None
@@ -140,13 +179,17 @@ def main():
 
     title_name = args.name if args.name else bin_path.stem
 
-    src = load_kitti_points(str(bin_path))
+    src = load_kitti_points(str(bin_path), point_dim=point_dim)
+    src_intensity_vis, src_intensity_mode = _normalize_intensity(src[:, 3])
 
     meta = {
         'source_bin': str(bin_path),
         'num_points': int(src.shape[0]),
         'intensity_mean': float(src[:, 3].mean()),
         'intensity_std': float(src[:, 3].std()),
+        'intensity_vis_mean': float(src_intensity_vis.mean()),
+        'intensity_vis_std': float(src_intensity_vis.std()),
+        'intensity_vis_mode': src_intensity_mode,
     }
 
     if compare_path is None:
@@ -173,7 +216,7 @@ def main():
         print(f'[OK] Saved single-bin visualizations to {output_dir}')
         return
 
-    cmp_pts = load_kitti_points(str(compare_path))
+    cmp_pts = load_kitti_points(str(compare_path), point_dim=point_dim)
     weather = {args.compare_name: cmp_pts}
 
     plot_bev_comparison(

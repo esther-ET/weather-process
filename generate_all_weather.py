@@ -116,6 +116,8 @@ def process_single_frame(input_path, output_path, weather_type,
                          particle_file_prefix=None, beam_divergence=0.35,
                          only_camera_fov=False, noise_floor=0.7, root_path=None,
                          lidar_parallel_backend='thread',
+                         particle_model='gunn', rainfall_rate_levels=None,
+                         rainfall_level_sampling='nearest',
                          channel_mode='infer', num_lasers=64,
                          fov_down_deg=-24.8, fov_up_deg=2.0,
                          sim_cache=None):
@@ -154,7 +156,10 @@ def process_single_frame(input_path, output_path, weather_type,
                                  only_camera_fov=only_camera_fov,
                                  noise_floor=noise_floor,
                                  root_path=root_path,
-                                   lidar_parallel_backend=lidar_parallel_backend,
+                                                                 lidar_parallel_backend=lidar_parallel_backend,
+                                                                 particle_model=particle_model,
+                                                                 rainfall_rate_levels=rainfall_rate_levels,
+                                                                 rainfall_level_sampling=rainfall_level_sampling,
                                  channel_mode=channel_mode,
                                  num_lasers=num_lasers,
                                  fov_down_deg=fov_down_deg,
@@ -164,7 +169,13 @@ def process_single_frame(input_path, output_path, weather_type,
         else:
             sim.set_snowfall_rate(sr)
         result = sim.simulate(points)
-        actual_params = {'snowfall_rate': round(sr, 2)}
+        actual_params = {
+            'snowfall_rate': round(sr, 2),
+            'particle_file_prefix': getattr(sim, 'last_particle_file_prefix', None),
+            'particle_rainfall_rate': getattr(sim, 'last_particle_rainfall_rate', None),
+            'target_rainfall_rate': getattr(sim, 'last_target_rainfall_rate', None),
+            'target_rainfall_level': getattr(sim, 'last_target_rainfall_level', None),
+        }
 
     elif weather_type == 'fog':
         if random_params:
@@ -192,11 +203,14 @@ def process_selected_frames(input_dir, output_dir, weather_type,
                             frame_list, params=None,
                             random_params=False, sample_mode='log',
                             num_workers=1,
+                            skip_existing=False,
                             rain_backend='auto', lisa_path=None,
                             snow_backend='auto', lidar_snow_sim_path=None,
                             particle_file_prefix=None, beam_divergence=0.35,
                             only_camera_fov=False, noise_floor=0.7, root_path=None,
                             lidar_parallel_backend='thread',
+                            particle_model='gunn', rainfall_rate_levels=None,
+                            rainfall_level_sampling='nearest',
                             channel_mode='infer', num_lasers=64,
                             fov_down_deg=-24.8, fov_up_deg=2.0):
     """
@@ -211,6 +225,7 @@ def process_selected_frames(input_dir, output_dir, weather_type,
         random_params: 是否随机
         sample_mode: 采样模式
         num_workers: 并行worker数 (1=单进程)
+        skip_existing: 跳过输出目录中已存在的文件
 
     Returns:
         dict: 每帧的参数记录
@@ -218,6 +233,16 @@ def process_selected_frames(input_dir, output_dir, weather_type,
     os.makedirs(output_dir, exist_ok=True)
     params = params or {}
     param_log = OrderedDict()
+
+    if skip_existing:
+        pending = [f for f in frame_list if not os.path.isfile(os.path.join(output_dir, f))]
+        skipped = len(frame_list) - len(pending)
+        if skipped:
+            print(f"  [{weather_type}] Skipping {skipped} already-processed files, {len(pending)} remaining")
+        frame_list = pending
+
+    if not frame_list:
+        return param_log
 
     if random_params:
         desc = f"{weather_type} (random, {sample_mode})"
@@ -240,6 +265,8 @@ def process_selected_frames(input_dir, output_dir, weather_type,
                 particle_file_prefix=particle_file_prefix, beam_divergence=beam_divergence,
                 only_camera_fov=only_camera_fov, noise_floor=noise_floor, root_path=root_path,
                 lidar_parallel_backend=lidar_parallel_backend,
+                particle_model=particle_model, rainfall_rate_levels=rainfall_rate_levels,
+                rainfall_level_sampling=rainfall_level_sampling,
                 channel_mode=channel_mode, num_lasers=num_lasers,
                 fov_down_deg=fov_down_deg, fov_up_deg=fov_up_deg,
                 sim_cache=sim_cache
@@ -262,6 +289,8 @@ def process_selected_frames(input_dir, output_dir, weather_type,
                     particle_file_prefix, beam_divergence,
                     only_camera_fov, noise_floor, root_path,
                     lidar_parallel_backend,
+                    particle_model, rainfall_rate_levels,
+                    rainfall_level_sampling,
                     channel_mode, num_lasers,
                     fov_down_deg, fov_up_deg
                 )
@@ -290,6 +319,8 @@ def process_mixed_weather(input_dir, output_dir, frame_list,
                           particle_file_prefix=None, beam_divergence=0.35,
                           only_camera_fov=False, noise_floor=0.7, root_path=None,
                           lidar_parallel_backend='thread',
+                          particle_model='gunn', rainfall_rate_levels=None,
+                          rainfall_level_sampling='nearest',
                           channel_mode='infer', num_lasers=64,
                           fov_down_deg=-24.8, fov_up_deg=2.0):
     """
@@ -335,6 +366,8 @@ def process_mixed_weather(input_dir, output_dir, frame_list,
             particle_file_prefix=particle_file_prefix, beam_divergence=beam_divergence,
             only_camera_fov=only_camera_fov, noise_floor=noise_floor, root_path=root_path,
             lidar_parallel_backend=lidar_parallel_backend,
+            particle_model=particle_model, rainfall_rate_levels=rainfall_rate_levels,
+            rainfall_level_sampling=rainfall_level_sampling,
             channel_mode=channel_mode, num_lasers=num_lasers,
             fov_down_deg=fov_down_deg, fov_up_deg=fov_up_deg,
             sim_cache=sim_cache
@@ -534,6 +567,15 @@ python generate_all_weather.py \\
     parser.add_argument("--lidar_parallel_backend", type=str, default='thread',
                         choices=['thread', 'process'],
                         help="LiDAR_snow_sim 通道并行后端: thread 或 process")
+    parser.add_argument("--particle_model", type=str, default='gunn',
+                        choices=['gunn', 'sekhon'],
+                        help="雪粒径分布模型：gunn 或 sekhon")
+    parser.add_argument("--rainfall_rate_levels", nargs='+', type=float,
+                        default=[2.0, 8.0, 17.0, 34.0, 70.0],
+                        help="自动选择 snow 粒子前缀时使用的降雨率档位(mm/h)")
+    parser.add_argument("--rainfall_level_sampling", type=str, default='nearest',
+                        choices=['nearest', 'balanced'],
+                        help="nearest: 按 snowfall_rate 最近档映射; balanced: 先等概率选档位再在档位内均匀采样")
     parser.add_argument("--channel_mode", type=str, default='infer',
                         choices=['infer', 'zero', 'require'],
                         help="Nx4输入时channel处理：infer(按仰角估计)/zero/require")
@@ -551,6 +593,8 @@ python generate_all_weather.py \\
     # ===== 性能 =====
     parser.add_argument("--num_workers", type=int, default=1,
                         help="并行worker数 (1=单进程)")
+    parser.add_argument("--skip_existing", action='store_true', default = True,
+                        help="跳过输出目录中已存在的文件，支持断点续处理")
 
     # ===== 附加功能 =====
     parser.add_argument("--preview", action='store_true',
@@ -629,6 +673,9 @@ python generate_all_weather.py \\
             noise_floor=args.noise_floor,
             root_path=args.root_path,
             lidar_parallel_backend=args.lidar_parallel_backend,
+            particle_model=args.particle_model,
+            rainfall_rate_levels=args.rainfall_rate_levels,
+            rainfall_level_sampling=args.rainfall_level_sampling,
             channel_mode=args.channel_mode,
             num_lasers=args.num_lasers,
             fov_down_deg=args.fov_down_deg,
@@ -657,6 +704,7 @@ python generate_all_weather.py \\
                     args.input_dir, out_dir, w, frame_list,
                     random_params=True, sample_mode=args.sample_mode,
                     num_workers=args.num_workers,
+                    skip_existing=args.skip_existing,
                     rain_backend=args.rain_backend,
                     lisa_path=args.lisa_path,
                     snow_backend=args.snow_backend,
@@ -667,6 +715,9 @@ python generate_all_weather.py \\
                     noise_floor=args.noise_floor,
                     root_path=args.root_path,
                     lidar_parallel_backend=args.lidar_parallel_backend,
+                    particle_model=args.particle_model,
+                    rainfall_rate_levels=args.rainfall_rate_levels,
+                    rainfall_level_sampling=args.rainfall_level_sampling,
                     channel_mode=args.channel_mode,
                     num_lasers=args.num_lasers,
                     fov_down_deg=args.fov_down_deg,
@@ -691,6 +742,7 @@ python generate_all_weather.py \\
                         args.input_dir, out_dir, w, frame_list,
                         params=params, random_params=False,
                         num_workers=args.num_workers,
+                        skip_existing=args.skip_existing,
                         rain_backend=args.rain_backend,
                         lisa_path=args.lisa_path,
                         snow_backend=args.snow_backend,
@@ -701,6 +753,9 @@ python generate_all_weather.py \\
                         noise_floor=args.noise_floor,
                         root_path=args.root_path,
                         lidar_parallel_backend=args.lidar_parallel_backend,
+                        particle_model=args.particle_model,
+                        rainfall_rate_levels=args.rainfall_rate_levels,
+                        rainfall_level_sampling=args.rainfall_level_sampling,
                         channel_mode=args.channel_mode,
                         num_lasers=args.num_lasers,
                         fov_down_deg=args.fov_down_deg,

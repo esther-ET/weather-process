@@ -7,6 +7,7 @@ vis_and_diff.py - 天气数据可视化与差异分析
 4. 距离-强度关系对比
 5. 差异热力图
 6. 统计指标量化
+
 """
 
 import numpy as np
@@ -33,6 +34,24 @@ def get_distance(pts):
     return np.sqrt(np.sum(pts[:, :3] ** 2, axis=1))
 
 
+def _normalize_intensity(intensity):
+    intensity = intensity.astype(np.float32)
+    if intensity.size == 0:
+        return intensity
+
+    vmin = float(np.nanmin(intensity))
+    vmax = float(np.nanmax(intensity))
+    if vmax <= 1.5 and vmin >= -0.1:
+        return np.clip(intensity, 0.0, 1.0)
+    if vmin >= 0.0 and vmax <= 255.0:
+        return np.clip(intensity / 255.0, 0.0, 1.0)
+
+    lo, hi = np.quantile(intensity, [0.01, 0.99])
+    if hi <= lo:
+        return np.zeros_like(intensity)
+    return np.clip((intensity - lo) / (hi - lo), 0.0, 1.0)
+
+
 # ============ 1. 点云BEV可视化 ============
 
 def plot_bev_comparison(clean_pts, weather_pts_dict, save_path,
@@ -50,7 +69,8 @@ def plot_bev_comparison(clean_pts, weather_pts_dict, save_path,
         mask = (pts[:, 0] > xlim[0]) & (pts[:, 0] < xlim[1]) & \
                (pts[:, 1] > ylim[0]) & (pts[:, 1] < ylim[1])
         p = pts[mask]
-        sc = ax.scatter(p[:, 1], p[:, 0], c=p[:, 3], cmap='viridis',
+        intensity = _normalize_intensity(p[:, 3])
+        sc = ax.scatter(p[:, 1], p[:, 0], c=intensity, cmap='viridis',
                         s=0.1, vmin=0, vmax=1, alpha=0.8)
         ax.set_xlim(ylim)
         ax.set_ylim(xlim)
@@ -86,7 +106,8 @@ def plot_side_view_comparison(clean_pts, weather_pts_dict, save_path,
         mask = (pts[:, 0] > xlim[0]) & (pts[:, 0] < xlim[1]) & \
                (pts[:, 2] > zlim[0]) & (pts[:, 2] < zlim[1])
         p = pts[mask]
-        ax.scatter(p[:, 0], p[:, 2], c=p[:, 3], cmap='viridis',
+        intensity = _normalize_intensity(p[:, 3])
+        ax.scatter(p[:, 0], p[:, 2], c=intensity, cmap='viridis',
                    s=0.1, vmin=0, vmax=1, alpha=0.6)
         ax.set_xlim(xlim)
         ax.set_ylim(zlim)
@@ -112,14 +133,16 @@ def plot_intensity_distribution(clean_pts, weather_pts_dict, save_path):
     """
     fig, ax = plt.subplots(1, 1, figsize=(10, 6))
 
+    clean_intensity = _normalize_intensity(clean_pts[:, 3])
     bins = np.linspace(0, 1, 100)
-    ax.hist(clean_pts[:, 3], bins=bins, density=True, alpha=0.6,
-            label=f'Clean (μ={clean_pts[:,3].mean():.3f})', color='black')
+    ax.hist(clean_intensity, bins=bins, density=True, alpha=0.6,
+            label=f'Clean (μ={clean_intensity.mean():.3f})', color='black')
 
     colors = plt.cm.Set1(np.linspace(0, 1, len(weather_pts_dict)))
     for (name, pts), c in zip(weather_pts_dict.items(), colors):
-        ax.hist(pts[:, 3], bins=bins, density=True, alpha=0.4,
-                label=f'{name} (μ={pts[:,3].mean():.3f})', color=c)
+        weather_intensity = _normalize_intensity(pts[:, 3])
+        ax.hist(weather_intensity, bins=bins, density=True, alpha=0.4,
+            label=f'{name} (μ={weather_intensity.mean():.3f})', color=c)
 
     ax.set_xlabel('Intensity', fontsize=13)
     ax.set_ylabel('Density', fontsize=13)
@@ -144,10 +167,11 @@ def plot_distance_intensity(clean_pts, weather_pts_dict, save_path):
 
     def compute_curve(pts):
         d = get_distance(pts)
+        intensity = _normalize_intensity(pts[:, 3])
         means, edges = [], dist_bins
         for i in range(len(edges) - 1):
             mask = (d >= edges[i]) & (d < edges[i + 1])
-            means.append(pts[mask, 3].mean() if np.any(mask) else np.nan)
+            means.append(intensity[mask].mean() if np.any(mask) else np.nan)
         return (edges[:-1] + edges[1:]) / 2, np.array(means)
 
     x, y = compute_curve(clean_pts)
@@ -285,12 +309,14 @@ def compute_statistics(clean_pts, weather_pts):
     stats_dict['point_ratio'] = len(weather_pts) / len(clean_pts)
 
     # 强度统计
-    stats_dict['clean_intensity_mean'] = float(clean_pts[:, 3].mean())
-    stats_dict['clean_intensity_std'] = float(clean_pts[:, 3].std())
-    stats_dict['weather_intensity_mean'] = float(weather_pts[:, 3].mean())
-    stats_dict['weather_intensity_std'] = float(weather_pts[:, 3].std())
+    clean_intensity = _normalize_intensity(clean_pts[:, 3])
+    weather_intensity = _normalize_intensity(weather_pts[:, 3])
+    stats_dict['clean_intensity_mean'] = float(clean_intensity.mean())
+    stats_dict['clean_intensity_std'] = float(clean_intensity.std())
+    stats_dict['weather_intensity_mean'] = float(weather_intensity.mean())
+    stats_dict['weather_intensity_std'] = float(weather_intensity.std())
     stats_dict['intensity_mean_diff'] = float(
-        weather_pts[:, 3].mean() - clean_pts[:, 3].mean()
+        weather_intensity.mean() - clean_intensity.mean()
     )
 
     # 距离统计
@@ -301,8 +327,8 @@ def compute_statistics(clean_pts, weather_pts):
 
     # KL散度 (强度分布)
     bins = np.linspace(0, 1, 50)
-    p_clean = np.histogram(clean_pts[:, 3], bins=bins, density=True)[0] + 1e-10
-    p_weather = np.histogram(weather_pts[:, 3], bins=bins, density=True)[0] + 1e-10
+    p_clean = np.histogram(clean_intensity, bins=bins, density=True)[0] + 1e-10
+    p_weather = np.histogram(weather_intensity, bins=bins, density=True)[0] + 1e-10
     p_clean /= p_clean.sum()
     p_weather /= p_weather.sum()
     kl_div = float(np.sum(p_clean * np.log(p_clean / p_weather)))
@@ -317,11 +343,11 @@ def compute_statistics(clean_pts, weather_pts):
     # Wasserstein距离 (Earth Mover's Distance)
     from scipy.stats import wasserstein_distance
     stats_dict['intensity_wasserstein'] = float(
-        wasserstein_distance(clean_pts[:, 3], weather_pts[:, 3])
+        wasserstein_distance(clean_intensity, weather_intensity)
     )
 
     # KS检验 (两样本)
-    ks_stat, ks_pval = stats.ks_2samp(clean_pts[:, 3], weather_pts[:, 3])
+    ks_stat, ks_pval = stats.ks_2samp(clean_intensity, weather_intensity)
     stats_dict['intensity_KS_statistic'] = float(ks_stat)
     stats_dict['intensity_KS_pvalue'] = float(ks_pval)
 
@@ -330,7 +356,7 @@ def compute_statistics(clean_pts, weather_pts):
         clean_pts[:, :3], weather_pts[:, :3], n_samples=5000
     ))
     stats_dict['MMD_intensity'] = float(_compute_mmd(
-        clean_pts[:, 3:4], weather_pts[:, 3:4], n_samples=5000
+        clean_intensity.reshape(-1, 1), weather_intensity.reshape(-1, 1), n_samples=5000
     ))
 
     # 距离分布KS检验
