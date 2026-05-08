@@ -159,35 +159,57 @@ def plot_intensity_distribution(clean_pts, weather_pts_dict, save_path):
 
 def plot_distance_intensity(clean_pts, weather_pts_dict, save_path):
     """
-    距离 vs 平均强度曲线 (展示衰减效果)
+    距离 vs 强度中位数 + 距离bin点数
+    上图展示强度中位数趋势，下图展示每个距离bin样本量（幸存者偏差强弱）
     """
-    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+    fig, axes = plt.subplots(2, 1, figsize=(10, 9), sharex=True)
+    ax_int = axes[0]
+    ax_cnt = axes[1]
 
     dist_bins = np.arange(0, 80, 2)
 
     def compute_curve(pts):
         d = get_distance(pts)
         intensity = _normalize_intensity(pts[:, 3])
-        means, edges = [], dist_bins
+        medians, counts, edges = [], [], dist_bins
         for i in range(len(edges) - 1):
             mask = (d >= edges[i]) & (d < edges[i + 1])
-            means.append(intensity[mask].mean() if np.any(mask) else np.nan)
-        return (edges[:-1] + edges[1:]) / 2, np.array(means)
+            if np.any(mask):
+                medians.append(float(np.median(intensity[mask])))
+                counts.append(int(mask.sum()))
+            else:
+                medians.append(np.nan)
+                counts.append(0)
+        return (edges[:-1] + edges[1:]) / 2, np.array(medians), np.array(counts)
 
-    x, y = compute_curve(clean_pts)
-    ax.plot(x, y, 'k-', linewidth=2, label='Clean')
+    x, y_med, y_cnt = compute_curve(clean_pts)
+    ax_int.plot(x, y_med, 'k-', linewidth=2, label='Clean')
+    ax_cnt.plot(x, y_cnt, 'k-', linewidth=2, label='Clean')
 
     colors = plt.cm.Set1(np.linspace(0, 1, len(weather_pts_dict)))
     for (name, pts), c in zip(weather_pts_dict.items(), colors):
-        x, y = compute_curve(pts)
-        ax.plot(x, y, '-', color=c, linewidth=1.5, label=name)
+        x, y_med, y_cnt = compute_curve(pts)
+        ax_int.plot(x, y_med, '-', color=c, linewidth=1.5, label=name)
+        ax_cnt.plot(x, y_cnt, '-', color=c, linewidth=1.5, label=name)
 
-    ax.set_xlabel('Distance (m)', fontsize=13)
-    ax.set_ylabel('Mean Intensity', fontsize=13)
-    ax.set_title('Distance vs Intensity (Signal Attenuation)', fontsize=14)
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
+    ax_int.set_ylabel('Median Intensity', fontsize=13)
+    ax_int.set_xlim(dist_bins[0], dist_bins[-1])
+    ax_int.set_xticks(np.arange(dist_bins[0], dist_bins[-1] + 1, 10))
+    ax_int.tick_params(axis='x', labelbottom=True)
+    ax_int.set_xlabel('Distance (m)', fontsize=13)
+    ax_int.set_title('Distance vs Intensity (Median, Robust)', fontsize=14)
+    ax_int.legend(fontsize=10)
+    ax_int.grid(True, alpha=0.3)
+
+    ax_cnt.set_xlabel('Distance (m)', fontsize=13)
+    ax_cnt.set_ylabel('Points per Bin', fontsize=13)
+    ax_cnt.set_xlim(dist_bins[0], dist_bins[-1])
+    ax_cnt.set_xticks(np.arange(dist_bins[0], dist_bins[-1] + 1, 10))
+    ax_cnt.set_title('Distance Bin Count (Survivor Bias Indicator)', fontsize=13)
+    ax_cnt.legend(fontsize=10)
+    ax_cnt.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.subplots_adjust(hspace=0.36, bottom=0.09)
     plt.savefig(save_path, dpi=200)
     plt.close()
     print(f"  Saved Dist-Int Curve: {save_path}")
@@ -197,9 +219,9 @@ def plot_distance_intensity(clean_pts, weather_pts_dict, save_path):
 
 def plot_point_density(clean_pts, weather_pts_dict, save_path):
     """
-    距离-点密度曲线 (展示远处丢点)
+    相对点密度曲线 (相对clean的保留率)
     """
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
 
     dist_bins = np.arange(0, 80, 2)
 
@@ -208,22 +230,8 @@ def plot_point_density(clean_pts, weather_pts_dict, save_path):
         counts = np.histogram(d, bins=dist_bins)[0]
         return (dist_bins[:-1] + dist_bins[1:]) / 2, counts
 
-    # 绝对密度
-    ax = axes[0]
-    x, y = compute_density(clean_pts)
-    ax.plot(x, y, 'k-', linewidth=2, label='Clean')
-    colors = plt.cm.Set1(np.linspace(0, 1, len(weather_pts_dict)))
-    for (name, pts), c in zip(weather_pts_dict.items(), colors):
-        x2, y2 = compute_density(pts)
-        ax.plot(x2, y2, '-', color=c, linewidth=1.5, label=name)
-    ax.set_xlabel('Distance (m)', fontsize=12)
-    ax.set_ylabel('Point Count', fontsize=12)
-    ax.set_title('Point Density vs Distance', fontsize=13)
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-
     # 相对密度 (相对clean的保留率)
-    ax = axes[1]
+    colors = plt.cm.Set1(np.linspace(0, 1, len(weather_pts_dict)))
     x_clean, y_clean = compute_density(clean_pts)
     for (name, pts), c in zip(weather_pts_dict.items(), colors):
         x2, y2 = compute_density(pts)
@@ -236,6 +244,8 @@ def plot_point_density(clean_pts, weather_pts_dict, save_path):
     ax.set_ylabel('Point Retention Ratio', fontsize=12)
     ax.set_title('Point Retention vs Distance', fontsize=13)
     ax.set_ylim(0, 2.0)
+    ax.set_xlim(dist_bins[0], dist_bins[-1])
+    ax.set_xticks(np.arange(dist_bins[0], dist_bins[-1] + 1, 10))
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 

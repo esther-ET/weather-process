@@ -13,17 +13,37 @@ python vis_single_bin.py \
   --compare_bin /mnt/nvme0n1p2/data/datasets/kitti_weather_random/rain_random/velodyne/000022.bin \
   --compare_name rain
 python vis_single_bin.py \
-  --bin_path /mnt/nvme0n1p2/data/datasets/dense/testing/lidar_hdl64_strongest/2018-12-09_10-56-06_07900.bin \
+  --bin_path /mnt/nvme0n1p2/data/datasets/KITTI2/object/training/velodyne/000022.bin \
   --output_dir /home/ubuntu/SWW/analysis/tmp \
-  --compare_bin /mnt/nvme0n1p2/data/datasets/dense/testing/lidar_hdl64_strongest/2018-12-09_10-56-06_07900.bin \
+  --compare_bin /mnt/nvme0n1p2/data/datasets/kitti_weather_random/snow_random/velodyne/000022.bin \
+  --compare_name snow
+python vis_single_bin.py \
+  --bin_path /mnt/nvme0n1p2/data/datasets/KITTI2/object/training/velodyne/000222.bin \
+  --output_dir /home/ubuntu/SWW/analysis/tmp \
+  --compare_bin /mnt/nvme0n1p2/data/datasets/kitti_weather_random/fog_random/velodyne/000222.bin \
+  --compare_name fog
+python vis_single_bin.py \
+  --bin_path /mnt/nvme0n1p2/data/datasets/dense/testing/lidar_hdl64_strongest/2019-01-09_10-18-26_00300.bin \
+  --compare_bin /mnt/nvme0n1p2/data/datasets/dense/testing/lidar_hdl64_strongest/2019-01-09_10-18-26_00300.bin \
   --compare_name snow \
   --output_dir /home/ubuntu/SWW/analysis/tmp_dense \
   --dense
 python vis_single_bin.py \
-  --bin_path /mnt/nvme0n1p2/data/datasets/snowfall_simulation/gunn/lidar_hdl64_strongest_rainrate_34/2018-02-17_10-36-53_00500.bin \
-  --output_dir /home/ubuntu/SWW/analysis/tmp \
-  --compare_bin /mnt/nvme0n1p2/data/datasets/snowfall_simulation/gunn/lidar_hdl64_strongest_rainrate_34/2018-02-17_10-36-53_00500.bin \
+  --bin_path /mnt/nvme0n1p2/data/datasets/dense/testing/lidar_hdl64_strongest/2018-12-09_10-52-24_01200.bin \
+  --compare_bin /mnt/nvme0n1p2/data/datasets/dense/testing/lidar_hdl64_strongest/2018-12-09_10-52-24_01200.bin \
+  --compare_name clear \
+  --output_dir /home/ubuntu/SWW/analysis/tmp_dense \
+  --dense
+python vis_single_bin.py \
+  --bin_path /mnt/nvme0n1p2/data/datasets/dense/snowfall_simulation/gunn/lidar_hdl64_strongest_rainrate_2/2018-02-05_12-04-44_00100.bin \
+  --compare_bin /mnt/nvme0n1p2/data/datasets/dense/snowfall_simulation/gunn/lidar_hdl64_strongest_rainrate_2/2018-02-05_12-04-44_00100.bin \
   --compare_name snow \
+  --output_dir /home/ubuntu/SWW/analysis/tmp_dense \
+  --dense
+python vis_single_bin.py \
+  --bin_path /mnt/nvme0n1p2/data/datasets/dense/testing/lidar_hdl64_strongest/2018-12-17_06-30-54_10200.bin \
+  --compare_bin /mnt/nvme0n1p2/data/datasets/dense/testing/lidar_hdl64_strongest/2018-12-17_06-30-54_10200.bin \
+  --compare_name fog \
   --output_dir /home/ubuntu/SWW/analysis/tmp_dense \
   --dense
 """
@@ -140,9 +160,37 @@ def _save_json(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def _infer_bev_limits(points, args):
+    """
+    对DENSE数据做轻量坐标系自适应。
+    默认参数下，若检测到 x 前向 / y 横向 的分布特征，自动切换到更合适的 BEV 范围。
+    """
+    xlim = tuple(args.xlim)
+    ylim = tuple(args.ylim)
+
+    # 仅在用户沿用默认范围时自动调整，避免覆盖用户显式配置。
+    if not args.dense:
+        return xlim, ylim
+    if list(args.xlim) != [-40, 40] or list(args.ylim) != [0, 70]:
+        return xlim, ylim
+
+    x = points[:, 0]
+    y = points[:, 1]
+    x_pos_ratio = float(np.mean(x > 0))
+    x_p95 = float(np.quantile(x, 0.95))
+    y_abs_p95 = float(np.quantile(np.abs(y), 0.95))
+
+    # x 大概率为正且前向跨度显著大于横向时，判定为 x-forward 框架。
+    if x_pos_ratio > 0.90 and x_p95 > y_abs_p95 * 1.2:
+        return (0.0, 70.0), (-40.0, 40.0)
+
+    return xlim, ylim
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description='Visualize one KITTI .bin directly, optional pairwise comparison.',
+        description='Visualize one KITTI .bin directly, optional pairwise comparison.\n'
+                    'Distance-intensity figure uses median and includes per-bin point counts.',
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
             "Examples:\n"
@@ -181,6 +229,9 @@ def main():
 
     src = load_kitti_points(str(bin_path), point_dim=point_dim)
     src_intensity_vis, src_intensity_mode = _normalize_intensity(src[:, 3])
+    plot_xlim, plot_ylim = _infer_bev_limits(src, args)
+    if plot_xlim != tuple(args.xlim) or plot_ylim != tuple(args.ylim):
+        print(f'[Info] Auto BEV limits for dense frame: xlim={plot_xlim}, ylim={plot_ylim}')
 
     meta = {
         'source_bin': str(bin_path),
@@ -197,8 +248,8 @@ def main():
             src,
             str(output_dir / 'single_bev.png'),
             title_name,
-            xlim=tuple(args.xlim),
-            ylim=tuple(args.ylim),
+            xlim=plot_xlim,
+            ylim=plot_ylim,
         )
         _plot_single_side(
             src,
@@ -223,8 +274,8 @@ def main():
         src,
         weather,
         str(output_dir / 'pair_bev.png'),
-        xlim=tuple(args.xlim),
-        ylim=tuple(args.ylim),
+        xlim=plot_xlim,
+        ylim=plot_ylim,
         title_prefix='',
     )
     plot_side_view_comparison(

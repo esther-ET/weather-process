@@ -30,6 +30,7 @@ class SnowSimulation:
                  particle_model='gunn',
                  rainfall_rate_levels=None,
                  rainfall_level_sampling='nearest',
+                 lidar_intensity_mode='kitti_01',
                  channel_mode='infer', num_lasers=64,
                  fov_down_deg=-24.8, fov_up_deg=2.0):
         """snowfall_rate: mm/h 水当量, 建议范围 [0.5, 10]"""
@@ -56,6 +57,11 @@ class SnowSimulation:
         if self.rainfall_level_sampling not in ('nearest', 'balanced'):
             raise ValueError(
                 f"rainfall_level_sampling must be 'nearest' or 'balanced', got {rainfall_level_sampling}"
+            )
+        self.lidar_intensity_mode = str(lidar_intensity_mode).lower()
+        if self.lidar_intensity_mode not in ('kitti_01', 'raw_255', 'auto'):
+            raise ValueError(
+                f"lidar_intensity_mode must be 'kitti_01', 'raw_255' or 'auto', got {lidar_intensity_mode}"
             )
         self.channel_mode = channel_mode
         self.num_lasers = int(num_lasers)
@@ -373,6 +379,16 @@ class SnowSimulation:
             raise RuntimeError("LiDAR_snow_sim tools/snowfall/simulation.py missing augment(...) entrypoint.")
 
         pc5 = self._ensure_channel(points)
+        in_max_i = float(np.max(points[:, 3])) if len(points) else 1.0
+        input_is_normalized = in_max_i <= 1.0 + 1e-6
+
+        # LiDAR_snow_sim snowfall model operates in a 0-255 intensity domain.
+        if self.lidar_intensity_mode == 'kitti_01' or (
+            self.lidar_intensity_mode == 'auto' and input_is_normalized
+        ):
+            pc5 = pc5.copy()
+            pc5[:, 3] = np.clip(pc5[:, 3], 0.0, 1.0) * 255.0
+
         particle_file_prefix = self._resolve_particle_file_prefix()
 
         stats, aug_pc = fn(
@@ -388,11 +404,16 @@ class SnowSimulation:
         )
         _ = stats
         out = np.asarray(aug_pc[:, :4], dtype=np.float32)
-        max_i = float(np.max(points[:, 3])) if len(points) else 1.0
-        if max_i <= 1.0 + 1e-6 and np.max(out[:, 3]) > 1.0:
+
+        if self.lidar_intensity_mode == 'kitti_01':
             out[:, 3] = np.clip(out[:, 3] / 255.0, 0.0, 1.0)
+        elif self.lidar_intensity_mode == 'raw_255':
+            out[:, 3] = np.clip(out[:, 3], 0.0, 255.0)
         else:
-            out[:, 3] = np.clip(out[:, 3], 0, 255 if np.max(out[:, 3]) > 1 else 1)
+            if input_is_normalized and np.max(out[:, 3]) > 1.0 + 1e-6:
+                out[:, 3] = np.clip(out[:, 3] / 255.0, 0.0, 1.0)
+            else:
+                out[:, 3] = np.clip(out[:, 3], 0.0, 255.0 if np.max(out[:, 3]) > 1.0 else 1.0)
         return out
 
     def _snowfall_to_rainfall_rate(self, snowfall_rate):
@@ -583,7 +604,7 @@ def _process_snow_batch(worker_payload):
      particle_file_prefix, beam_divergence, only_camera_fov,
      noise_floor, root_path, lidar_parallel_backend,
     particle_model, rainfall_rate_levels,
-    rainfall_level_sampling,
+    rainfall_level_sampling, lidar_intensity_mode,
      channel_mode, num_lasers, fov_down_deg, fov_up_deg,
      skip_existing) = worker_payload
 
@@ -604,6 +625,7 @@ def _process_snow_batch(worker_payload):
         particle_model=particle_model,
         rainfall_rate_levels=rainfall_rate_levels,
         rainfall_level_sampling=rainfall_level_sampling,
+        lidar_intensity_mode=lidar_intensity_mode,
         channel_mode=channel_mode,
         num_lasers=num_lasers,
         fov_down_deg=fov_down_deg,
@@ -640,6 +662,7 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
                        particle_model='gunn',
                        rainfall_rate_levels=None,
                        rainfall_level_sampling='nearest',
+                       lidar_intensity_mode='kitti_01',
                        num_workers=1,
                        skip_existing=False,
                        channel_mode='infer', num_lasers=64,
@@ -681,6 +704,7 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
             particle_model=particle_model,
             rainfall_rate_levels=rainfall_rate_levels,
             rainfall_level_sampling=rainfall_level_sampling,
+            lidar_intensity_mode=lidar_intensity_mode,
             channel_mode=channel_mode,
             num_lasers=num_lasers,
             fov_down_deg=fov_down_deg,
@@ -715,7 +739,7 @@ def process_kitti_snow(input_dir, output_dir, snowfall_rate=None,
                     particle_file_prefix, beam_divergence, only_camera_fov,
                     noise_floor, root_path, lidar_parallel_backend,
                     particle_model, rainfall_rate_levels,
-                    rainfall_level_sampling,
+                    rainfall_level_sampling, lidar_intensity_mode,
                     channel_mode, num_lasers, fov_down_deg, fov_up_deg,
                     skip_existing
                 )
@@ -766,6 +790,9 @@ if __name__ == "__main__":
     parser.add_argument("--rainfall_level_sampling", type=str, default='nearest',
                         choices=['nearest', 'balanced'],
                         help="nearest: 按 snowfall_rate 最近档映射; balanced: 先等概率选档位再在档位内均匀采样")
+    parser.add_argument("--lidar_intensity_mode", type=str, default='kitti_01',
+                        choices=['kitti_01', 'raw_255', 'auto'],
+                        help="LiDAR_snow_sim 强度域处理: kitti_01(输入0~1转255并在输出除255), raw_255(保持0~255), auto(兼容启发式)")
     parser.add_argument("--num_workers", type=int, default=1,
                         help="并行处理帧数的worker数(>1启用多进程)")
     parser.add_argument("--skip_existing", action='store_true',
@@ -797,6 +824,7 @@ if __name__ == "__main__":
                        particle_model=args.particle_model,
                        rainfall_rate_levels=args.rainfall_rate_levels,
                        rainfall_level_sampling=args.rainfall_level_sampling,
+                       lidar_intensity_mode=args.lidar_intensity_mode,
                        num_workers=args.num_workers,
                        skip_existing=args.skip_existing,
                        channel_mode=args.channel_mode,

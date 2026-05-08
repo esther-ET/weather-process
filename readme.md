@@ -50,7 +50,8 @@ python generate_all_weather.py \
 
 # 跨域分析命令汇总
 ```python
-# 1. 生成天气数据（随机参数） 
+# 1. 生成天气数据（随机参数）
+# particle_file_prefix 是可选的
 python generate_all_weather.py \
  --weather snow \
  --input_dir /mnt/nvme0n1p2/data/datasets/KITTI2/object/training/velodyne \
@@ -68,6 +69,7 @@ python generate_all_weather.py \
 # 2) 帧级并行 --num_workers N（N≈物理核数的一半到1倍）
 # 3) LiDAR_snow_sim 内部并行使用 process（CPU 充足时）
 # 4) 添加 --skip_existing 支持断点续处理（已处理的帧直接跳过）
+# particle_file_prefix是可选的
 python snow_simulation.py \
   --input_dir /mnt/nvme0n1p2/data/datasets/KITTI2/object/training/velodyne \
   --output_dir /mnt/nvme0n1p2/data/datasets/kitti_weather_random/snow_fast/velodyne \
@@ -147,13 +149,12 @@ cp /home/ubuntu/SWW/code/LiDAR_snow_sim/lib/LiDAR_fog_sim/integral_lookup_tables
   - `--channel_mode infer`（默认）：按点的仰角 + FOV 估计 pseudo ring/channel
   - `--channel_mode zero`：第5维全0
   - `--channel_mode require`：强制必须输入Nx5
-- 使用 `--snow_backend lidar_snow_sim` 时还需提供：
-  - `--particle_file_prefix`（必需）
+
   - 可选 `--beam_divergence --only_camera_fov --noise_floor --root_path`
   - 适配参数：`--num_lasers --fov_down_deg --fov_up_deg`
 
 示例：
-雪生成：先每个档位平均，再在档位里面取值
+雪生成：先每个档位平均，再在档位里面取值！！！！！！！！！！！！ 之后用这个
 ```bash
 python generate_all_weather.py \
  --weather snow\
@@ -178,3 +179,49 @@ python generate_all_weather.py \
 ```
 （`--lidar_snow_sim_path` 既支持仓库根目录，也支持直接给 `tools/snowfall` 目录）
 现在导入失败时 warning / error 会打印已搜索路径与导入异常，便于定位依赖或路径问题。
+
+## 雪分布相关：
+中间两个参数：等效降雨率，mm/h 二维采样域内雪花盘面积占比
+gunn_2.621627143512277_7.716049382716048e-07_1.npy
+gunn_2.2383844962893775_6.944444444444445e-07_1.npy
+gunn_3.1282374334279206_8.680555555555554e-07_1.npy
+gunn_3.8219731266508847_9.92063492063492e-07_1.npy
+gunn_4.816236598076465_1.1574074074074074e-06_1.npy
+gunn_6.331107424916213_1.388888888888889e-06_1.npy
+gunn_7.4150813236809965_1.5432098765432096e-06_1.npy
+gunn_8.847991609353935_1.7361111111111108e-06_1.npy
+gunn_10.810172461470367_1.984126984126984e-06_1.npy
+gunn_11.63098702334301_2.0833333333333334e-06_1.npy
+gunn_13.622374233194783_2.3148148148148144e-06_1.npy
+gunn_13.622374233194787_2.3148148148148148e-06_1.npy
+gunn_16.254798518508064_2.604166666666666e-06_1.npy
+gunn_17.90707597031502_2.777777777777778e-06_1.npy
+gunn_19.859554921566634_2.976190476190476e-06_1.npy
+gunn_20.973017148098215_3.086419753086419e-06_1.npy
+gunn_25.025899467423365_3.4722222222222215e-06_1.npy
+gunn_29.31068252276024_3.858024691358024e-06_1.npy
+gunn_30.575785013207078_3.968253968253968e-06_1.npy
+gunn_32.89739918439432_4.166666666666667e-06_1.npy
+gunn_34.97475775452152_4.340277777777777e-06_1.npy
+gunn_38.52989278461172_4.6296296296296296e-06_1.npy
+gunn_42.730958596843955_4.9603174603174595e-06_1.npy
+gunn_45.97551303703239_5.208333333333332e-06_1.npy
+gunn_50.6488593993297_5.555555555555556e-06_1.npy
+gunn_53.84716214510654_5.787037037037037e-06_1.npy
+gunn_70.78393287483146_6.944444444444444e-06_1.npy
+gunn_98.92355351431581_8.680555555555554e-06_1.npy
+gunn_108.97899386555827_9.259259259259257e-06_1.npy
+gunn_130.0383881480645_1.0416666666666665e-05_1.npy
+gunn_152.30277400182553_1.1574074074074072e-05_1.npy
+gunn_200.20719573938692_1.3888888888888886e-05_1.npy
+gunn_279.79806203617215_1.7361111111111108e-05_1.npy
+gunn_367.80410429625914_2.083333333333333e-05_1.npy
+gunn_566.2714629986518_2.7777777777777772e-05_1.npy
+gunn_791.3884281145265_3.4722222222222215e-05_1.npy
+
+原仓库：
+0.5 2.0 2.2383844962893775 =2
+1.0 1.6 8.847991609353935  =8
+2.0 2.0 17.90707597031502  =17
+2.5 1.6 34.97475775452152  =34
+1.5 0.6 70.78393287483148  =70
