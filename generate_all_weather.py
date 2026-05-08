@@ -107,6 +107,31 @@ def resolve_frame_list(input_dir, frames=None, frame_range=None,
         return all_bins
 
 
+
+def sample_configured_visibility(sample_mode='log', params=None):
+    """Sample fog visibility from built-in modes or a user-provided discrete distribution."""
+    params = params or {}
+    values = params.get('fog_visibility_values')
+    weights = params.get('fog_visibility_weights')
+
+    if values is None:
+        return sample_visibility(sample_mode)
+
+    values = np.asarray(values, dtype=float)
+    if values.ndim != 1 or len(values) == 0:
+        raise ValueError("fog_visibility_values must be a non-empty 1D list")
+
+    probabilities = None
+    if weights is not None:
+        probabilities = np.asarray(weights, dtype=float)
+        if probabilities.shape != values.shape:
+            raise ValueError("fog_visibility_weights must have the same length as fog_visibility_values")
+        if np.any(probabilities < 0) or probabilities.sum() <= 0:
+            raise ValueError("fog_visibility_weights must be non-negative and sum to a positive value")
+        probabilities = probabilities / probabilities.sum()
+
+    return float(np.random.choice(values, p=probabilities))
+
 # ============ 单帧处理函数 ============
 
 def process_single_frame(input_path, output_path, weather_type,
@@ -179,8 +204,8 @@ def process_single_frame(input_path, output_path, weather_type,
 
     elif weather_type == 'fog':
         if random_params:
-            vis = sample_visibility(sample_mode)
-            ft = 'inhomogeneous' if vis < 200 else 'uniform'
+            vis = sample_configured_visibility(sample_mode, params)
+            ft = params.get('fog_type', 'uniform')
         else:
             vis = params.get('visibility', 500.0)
             ft = params.get('fog_type', 'uniform')
@@ -314,6 +339,7 @@ def process_mixed_weather(input_dir, output_dir, frame_list,
                           weather_types=None, weather_weights=None,
                           random_params=True, sample_mode='log',
                           num_workers=1, seed=None,
+                          fog_params=None,
                           rain_backend='auto', lisa_path=None,
                           snow_backend='auto', lidar_snow_sim_path=None,
                           particle_file_prefix=None, beam_divergence=0.35,
@@ -358,9 +384,10 @@ def process_mixed_weather(input_dir, output_dir, frame_list,
         input_path = os.path.join(input_dir, fname)
         output_path = os.path.join(output_dir, fname)
 
+        params = fog_params if wtype == 'fog' else {}
         actual = process_single_frame(
             input_path, output_path, wtype,
-            {}, random_params, sample_mode,
+            params, random_params, sample_mode,
             rain_backend=rain_backend, lisa_path=lisa_path,
             snow_backend=snow_backend, lidar_snow_sim_path=lidar_snow_sim_path,
             particle_file_prefix=particle_file_prefix, beam_divergence=beam_divergence,
@@ -542,6 +569,13 @@ python generate_all_weather.py \\
                         help="每帧随机采样参数")
     parser.add_argument("--sample_mode", type=str, default='log',
                         choices=['uniform', 'log', 'category'])
+    parser.add_argument("--fog_type", type=str, default='uniform',
+                        choices=['uniform', 'inhomogeneous'],
+                        help="随机雾参数时使用的fog_type；不会被visibility采样覆盖，为贴近LiDAR_fog_sim建议保持uniform")
+    parser.add_argument("--fog_visibility_values", nargs='+', type=float, default=None,
+                        help="自定义雾能见度离散取值(m)，如: 50 100 200 500")
+    parser.add_argument("--fog_visibility_weights", nargs='+', type=float, default=None,
+                        help="自定义能见度取值的概率/权重，长度需与--fog_visibility_values一致")
     parser.add_argument("--seed", type=int, default=None,
                         help="随机种子")
     parser.add_argument("--rain_backend", type=str, default='auto',
@@ -612,6 +646,21 @@ python generate_all_weather.py \\
     if args.seed is not None:
         np.random.seed(args.seed)
 
+    if args.fog_visibility_weights is not None:
+        if args.fog_visibility_values is None:
+            parser.error("--fog_visibility_weights requires --fog_visibility_values")
+        if len(args.fog_visibility_weights) != len(args.fog_visibility_values):
+            parser.error("--fog_visibility_weights must have the same length as --fog_visibility_values")
+
+    # fog_type and visibility sampling are independent: the visibility
+    # distribution controls fog density, while fog_type controls whether the
+    # chosen alpha is applied uniformly or with the local inhomogeneous variant.
+    fog_random_params = {
+        'fog_type': args.fog_type,
+        'fog_visibility_values': args.fog_visibility_values,
+        'fog_visibility_weights': args.fog_visibility_weights,
+    }
+
     # ===== 解析帧列表 =====
     frame_list = resolve_frame_list(
         args.input_dir,
@@ -663,6 +712,7 @@ python generate_all_weather.py \\
             sample_mode=args.sample_mode,
             num_workers=args.num_workers,
             seed=args.seed,
+            fog_params=fog_random_params,
             rain_backend=args.rain_backend,
             lisa_path=args.lisa_path,
             snow_backend=args.snow_backend,
@@ -702,6 +752,7 @@ python generate_all_weather.py \\
 
                 param_log = process_selected_frames(
                     args.input_dir, out_dir, w, frame_list,
+                    params=fog_random_params if w == 'fog' else None,
                     random_params=True, sample_mode=args.sample_mode,
                     num_workers=args.num_workers,
                     skip_existing=args.skip_existing,

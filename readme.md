@@ -123,6 +123,76 @@ compute_statistics(clean_pts, weather_pts) 的作用：计算 clean 与 weather 
 
 
 # 参数说明
+
+## 雾模型参数与能见度对标
+
+本仓库的雾模拟以 MartinHahner/LiDAR_fog_sim 的 `fog_simulation.py` 和
+`generate_integral_lookup_table.py` 为对齐目标；新增的 `ParameterSet` 字段不是重新设计的
+经验参数，而是上游 `ParameterSet` 中用于 hard target 衰减、soft target 查表与积分表生成的物理/数值参数。
+
+### 核心物理量
+
+| 参数 | 含义 | 本仓库/上游中的作用 |
+| --- | --- | --- |
+| `alpha` | 大气消光/衰减系数，单位约为 `1/m`，数值越大雾越浓 | hard target 用 `exp(-2 * alpha * r)` 做双程强度衰减；soft target 用它选择最近的积分表 |
+| `mor` | Meteorological Optical Range，气象光学距离/能见度 | 由 Koschmieder 关系 `mor = log(20) / alpha` 得到；本仓库输入的 `visibility` 会映射为 `alpha = log(20) / visibility` |
+| `beta` | 后向散射系数，单位约为 `1/sr` | soft target 的雾回波强度缩放项；为贴近 LiDAR_fog_sim，上游覆盖 `alpha` 时不会自动重算 `beta` |
+| `gamma` | hard target 反射率相关参数 | 决定 `beta_0 = gamma / pi`，参与真实物体回波与雾回波的相对强度标定 |
+| `beta_0` | hard target differential reflectivity | soft target 强度缩放中的分母，用于比较雾回波是否强过衰减后的物体回波 |
+
+### 新增/保留参数来自哪里
+
+- `n`、`r_range` 及其 min/max：积分表生成时的距离采样精度和最大积分范围。
+- `p_0`、`tau_h`、`e_p`：发射脉冲峰值功率、半高脉宽、脉冲能量；`tau_h` 也出现在积分表文件名中。
+- `a_r`、`l_r`、`c_a`：接收孔径、接收光学损耗和组合常数，soft target 积分归一化/反归一化会用到。
+- `D`、`ROH_T`、`ROH_R`、`GAMMA_T*`、`GAMMA_R*`、`r_1`、`r_2`、`linear_xsi`：上游单束理论模型中的发射器/接收器几何与视场重叠参数；当前批量点云增强主要依赖预计算表，但保留它们可以保持参数集语义一致。
+- `r_0`：单束理论/积分表生成时的 hard target 距离变量；批量点云增强时每个点会用自己的欧氏距离替代。
+- `*_min`、`*_max`、`*_scale`：上游 GUI/参数调节范围，批处理仿真不直接使用；保留它们是为了和上游 `ParameterSet` 接近。
+- `gain`：上游 `simulate_fog(..., gain=...)` 的可选强度归一化开关，默认关闭。
+
+### 能见度如何对标实际、与积分表的关系
+
+- 实际对标使用 Koschmieder 定律：`visibility = mor = log(20) / alpha`，即 5% 对比度阈值下的气象光学距离。
+  例如 `visibility=500m` 时，代码使用 `alpha≈0.00599`；`visibility=50m` 时，`alpha≈0.0599`，雾更浓。
+- hard target 衰减只依赖 `alpha` 和点距，不依赖积分表；即使没有积分表，也会生成真实物体回波变暗的结果。
+- soft target 依赖积分表：积分表按离散 `alpha` 和 `tau_h` 预计算雾滴回波峰值距离/响应；运行时会选择与当前 `alpha` 最近的表。
+- 因此积分表不会重新定义“能见度”，但会影响雾点替换的位置和强度；若目标 visibility 对应的 `alpha` 与表中离散值差距较大，soft target 会近似到最近表，和真实目标 visibility 之间会产生量化误差。
+- 若积分表缺失，本仓库会退化为仅 hard attenuation；这种输出仍按目标能见度变暗，但不会产生 LiDAR_fog_sim 的近距雾回波点。
+
+
+## 生成符合指定能见度分布的雾天
+
+如果目标是让雾天点云的强度分布更接近某个数据集，通常需要先指定或拟合一组 `visibility` 分布；
+`visibility` 会通过 `alpha = log(20) / visibility` 控制 hard target 衰减，并通过最近的积分表控制 soft target 雾回波。
+
+本仓库支持两类随机雾参数：
+
+- 内置分布：`--random_params --sample_mode uniform|log|category`，最终调用 `utils.sample_visibility()`。
+- 自定义离散分布：`--fog_visibility_values` 给定能见度取值，`--fog_visibility_weights` 给定对应权重。
+
+`fog_type` 和 `fog_visibility` 是两个独立维度：
+
+- `fog_visibility` 决定雾的浓度，也就是 `alpha = log(20) / visibility`；visibility 越小，雾越浓。
+- `fog_type` 决定 `alpha` 在空间上如何使用：`uniform` 使用同一个 `alpha`，更贴近 LiDAR_fog_sim；`inhomogeneous` 是本仓库扩展，会在每个点上加入随机的局部 `alpha` 扰动。
+- 设置 `--fog_visibility_values` 或 `--fog_visibility_weights` 只会影响每帧采样到的 `visibility`，不会覆盖 `--fog_type`。例如 `--fog_type uniform --fog_visibility_values 50 100` 仍然生成 uniform fog，只是每帧能见度从 50m/100m 中采样。
+
+示例：按 50m/100m/200m/500m 四个能见度档位生成雾，其中 200m 权重最高：
+
+```bash
+python generate_all_weather.py \
+  --weather fog \
+  --input_dir /path/to/KITTI/object/training/velodyne \
+  --output_dir /path/to/kitti_weather \
+  --random_params --sample_mode log --seed 42 \
+  --fog_type uniform \
+  --fog_visibility_values 50 100 200 500 \
+  --fog_visibility_weights 0.1 0.2 0.5 0.2
+```
+
+输出会写到 `OUTPUT/fog_random/velodyne`，每帧实际采样到的 `visibility` 会记录在
+`OUTPUT/fog_random_params.txt` 和 `OUTPUT/fog_random_params.npy`。如果不提供
+`--fog_visibility_values`，则继续使用 `--sample_mode` 的内置采样逻辑。
+
 ## 雾积分表（本地化，无外部耦合）
 - 雾 soft target 需要积分查表文件，默认目录：`/home/ubuntu/SWW/code/weather-process/integral_lookup_tables/original`
 - 文件名格式：`integral_0m_to_200m_stepsize_0.1m_tau_h_20ns_alpha_*.pickle`
