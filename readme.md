@@ -64,7 +64,7 @@ python generate_all_weather.py \
  --particle_file_prefix gunn_4.816236598076465_1.1574074074074074e-06\
 --lidar_parallel_backend process
 
-# 雪模拟太慢时（如 7891 帧耗时过长），建议优先这样跑：
+
 # 1) 只开雪 weather，避免和雨雾串行
 # 2) 帧级并行 --num_workers N（N≈物理核数的一半到1倍）
 # 3) LiDAR_snow_sim 内部并行使用 process（CPU 充足时）
@@ -72,7 +72,7 @@ python generate_all_weather.py \
 # particle_file_prefix是可选的
 python snow_simulation.py \
   --input_dir /mnt/nvme0n1p2/data/datasets/KITTI2/object/training/velodyne \
-  --output_dir /mnt/nvme0n1p2/data/datasets/kitti_weather_random/snow_fast/velodyne \
+  --output_dir /mnt/nvme0n1p2/data/datasets/kitti_weather_random/snow/velodyne \
   --backend lidar_snow_sim \
   --lidar_snow_sim_path ~/SWW/code/LiDAR_snow_sim \
   --particle_file_prefix gunn_4.816236598076465_1.1574074074074074e-06 \
@@ -181,8 +181,8 @@ compute_statistics(clean_pts, weather_pts) 的作用：计算 clean 与 weather 
 ```bash
 python generate_all_weather.py \
   --weather fog \
-  --input_dir /path/to/KITTI/object/training/velodyne \
-  --output_dir /path/to/kitti_weather \
+  --input_dir /mnt/nvme0n1p2/data/datasets/KITTI2/object/training/velodyne \
+  --output_dir /mnt/nvme0n1p2/data/datasets/kitti_weather_random \
   --random_params --sample_mode log --seed 42 \
   --fog_type uniform \
   --fog_visibility_values 50 100 200 500 \
@@ -205,25 +205,7 @@ cp /home/ubuntu/SWW/code/LiDAR_snow_sim/lib/LiDAR_fog_sim/integral_lookup_tables
   /home/ubuntu/SWW/code/weather-process/integral_lookup_tables/original/
 ```
 
-# 深度复用外部物理仿真后端（LISA / LiDAR_snow_sim）
-- 雨支持后端：
-  - `--rain_backend heuristic`：当前仓库启发式
-  - `--rain_backend lisa`：强制使用 LISA（需可导入 `atmos_models.py`）
-  - `--rain_backend auto`：优先 LISA，不可用时回退 heuristic
-- 雪支持后端：
-  - `--snow_backend heuristic`：当前仓库启发式
-  - `--snow_backend lidar_snow_sim`：强制使用 LiDAR_snow_sim（需可导入 `tools/snowfall/simulation.py`）
-  - `--snow_backend auto`：优先 LiDAR_snow_sim，不可用时回退 heuristic
-- 注意：`LiDAR_snow_sim` 的 `augment` 接口原生要求 **N×5**（`x,y,z,intensity,channel`）。
-  本仓库已内置 Nx4 适配：
-  - `--channel_mode infer`（默认）：按点的仰角 + FOV 估计 pseudo ring/channel
-  - `--channel_mode zero`：第5维全0
-  - `--channel_mode require`：强制必须输入Nx5
 
-  - 可选 `--beam_divergence --only_camera_fov --noise_floor --root_path`
-  - 适配参数：`--num_lasers --fov_down_deg --fov_up_deg`
-
-示例：
 雪生成：先每个档位平均，再在档位里面取值！！！！！！！！！！！！ 之后用这个
 ```bash
 python generate_all_weather.py \
@@ -295,3 +277,22 @@ gunn_791.3884281145265_3.4722222222222215e-05_1.npy
 2.0 2.0 17.90707597031502  =17
 2.5 1.6 34.97475775452152  =34
 1.5 0.6 70.78393287483148  =70
+
+
+# 深度复用外部物理仿真后端（LISA / LiDAR_snow_sim）
+- 雨支持后端：
+  - `--rain_backend heuristic`：当前仓库启发式
+  - `--rain_backend lisa`：强制使用 LISA（需可导入 `atmos_models.py`）
+  - `--rain_backend auto`：优先 LISA，不可用时回退 heuristic
+- 雪支持后端：
+  - `--snow_backend heuristic`：当前仓库启发式
+  - `--snow_backend lidar_snow_sim`：强制使用 LiDAR_snow_sim（需可导入 `tools/snowfall/simulation.py`）
+  - `--snow_backend auto`：优先 LiDAR_snow_sim，不可用时回退 heuristic
+- 注意：`LiDAR_snow_sim` 的 `augment` 接口原生要求 **N×5**（`x,y,z,intensity,channel`）。
+  本仓库已内置 Nx4 适配：
+  - `--channel_mode infer`（默认）：按点的仰角 + FOV 估计 pseudo ring/channel
+  - `--channel_mode zero`：第5维全0
+  - `--channel_mode require`：强制必须输入Nx5
+
+  - 可选 `--beam_divergence --only_camera_fov --noise_floor --root_path`
+  - 适配参数：`--num_lasers --fov_down_deg --fov_up_deg`
